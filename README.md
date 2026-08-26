@@ -6,8 +6,8 @@ The three-branch “RGB ViT + SRM ResNet + Canny ConvNeXt” stack is the right 
 
 1. **Semantic stream** — frozen CLIP ViT-B/16 (~86M, not trained). Distributional / photographic cues survive redistribution (UnivFD-style).
 2. **Forensic stream** — ResNet-18 on high-pass + neighboring-pixel + **mid-band** spectrum maps, not raw SRM/PRNU.
-3. **Degradation-aware gate** — cheap stats (blur, 8×8 blockiness, HF energy, noise) scale the forensic embedding so the model does not rely on traces that are already gone.
-4. **Protocol-matched training** — the official transform table is sampled during training. That is the main robustness lever.
+3. **Degradation-aware gate** — cheap stats (blur, 8×8 blockiness, HF energy, noise) scale the forensic embedding; the gate is also supervised toward `1 − severity` from the known protocol transform.
+4. **Protocol-matched training** — paired clean/transformed forwards with consistency loss + official transform table sampling.
 
 Total parameters ≈ 97M (CLIP frozen). Trainable ≈ 12M. Under the **&lt;2B** cap.
 
@@ -62,11 +62,17 @@ Without a checkpoint, CLIP **zero-shot prompts** are used so the demo still runs
 python infer.py --input_dir path/to/images --output outputs/preds.json --zeroshot
 ```
 
-## Robustness table
+## Robustness table + gate ablation
 
 ```bash
 python evaluate.py --data_dir data/val --checkpoint checkpoints/best.pt --output outputs/robustness.csv
+# Also writes outputs/gate_vs_severity.png and outputs/reliability_clean.png
+
+python evaluate.py --data_dir data/val --checkpoint checkpoints/best.pt --ablation --output outputs/ablation.csv
+# Adds semantic-only (g=0) / forensic-always (g=1) / full ForgeGate rows + ablation_insight.json
 ```
+
+Training uses paired clean/transformed forwards with consistency loss and an explicit gate regularizer toward `1 - severity`. Temperature scaling is fit on the protocol-augmented val set after the last epoch.
 
 ## Error analysis
 
@@ -92,9 +98,8 @@ Upload an image, optionally apply an official transform, read P(AIGC) and the fo
 
 - Zero-shot CLIP is a baseline, not a detector. Train the gate + forensic head on SID_Set or WildFake (minus the demo split).
 - CIFAKE 32×32 is not a fair generator-forensics test after upsampling.
-- The gate is supervised only indirectly through detection loss; a small labelled-degradation auxiliary would make it more calibrated.
 - No generator-ID attribution; image-level only, as specified.
-- Given more time: test-time augmentation, temperature scaling on the protocol mix, and a second forensic view (NPR-only) for JPEG q=30.
+- Given more time: multi-layer CLIP patch features, test-time augmentation, and a second forensic view (NPR-only) for JPEG q=30.
 
 ## Team
 

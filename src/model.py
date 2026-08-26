@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 import torch.nn as nn
@@ -13,6 +14,8 @@ from .features import degradation_stats, forensic_maps
 
 CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
 CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
+
+GateMode = Literal["learned", "zero", "one"]
 
 
 def clip_normalize(x: torch.Tensor) -> torch.Tensor:
@@ -77,11 +80,20 @@ class ForgeGate(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(256, 1),
         )
+        # Set after temperature scaling on a protocol-held-out set.
+        self.register_buffer("temperature", torch.ones(1))
 
         self.zeroshot_prompts = (
             "a real photograph taken by a camera",
             "an AI-generated synthetic image",
         )
+
+    def train(self, mode: bool = True):
+        """Keep frozen CLIP deterministic even when the rest of the model trains."""
+        super().train(mode)
+        if self.freeze_clip:
+            self.clip.eval()
+        return self
 
     def encode_semantic(self, rgb: torch.Tensor) -> torch.Tensor:
         x = clip_normalize(rgb)
@@ -91,20 +103,36 @@ class ForgeGate(nn.Module):
         z = z.float()
         return z / z.norm(dim=-1, keepdim=True).clamp_min(1e-6)
 
-    def forward(self, rgb: torch.Tensor) -> ForgeGateOutput:
-        """rgb: Bx3xHxW in [0, 1]."""
+    def forward(
+        self,
+        rgb: torch.Tensor,
+        gate_mode: GateMode = "learned",
+    ) -> ForgeGateOutput:
+        """rgb: Bx3xHxW in [0, 1].
+
+        gate_mode:
+          - learned: use predicted gate (default)
+          - zero: semantic-only ablation (force g=0)
+          - one: forensic-always ablation (force g=1)
+        """
         z_s = self.encode_semantic(rgb)
         maps = forensic_maps(rgb)
         stats = degradation_stats(rgb)
         z_f = self.forensic(maps)
         z_f = z_f / z_f.norm(dim=-1, keepdim=True).clamp_min(1e-6)
-        gate = torch.sigmoid(self.gate(torch.cat([z_s, z_f, stats], dim=1)))
+        gate_raw = torch.sigmoid(self.gate(torch.cat([z_s, z_f, stats], dim=1)))
+        if gate_mode == "zero":
+            gate = torch.zeros_like(gate_raw)
+        elif gate_mode == "one":
+            gate = torch.ones_like(gate_raw)
+        else:
+            gate = gate_raw
         fused = torch.cat([z_s, gate * z_f], dim=1)
-        logit = self.head(fused).squeeze(-1)
+        logit = self.head(fused).squeeze(-1) / self.temperature.clamp_min(1e-4)
         return ForgeGateOutput(
             logit=logit,
             prob=torch.sigmoid(logit),
-            gate=gate.squeeze(-1),
+            gate=gate_raw.squeeze(-1),  # always report the learned gate for audits
             stats=stats,
         )
 

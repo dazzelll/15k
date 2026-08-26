@@ -33,6 +33,8 @@ def build(checkpoint: str | None, zeroshot: bool, device: torch.device):
         state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
         model.load_state_dict(state, strict=False)
         use_zeroshot = zeroshot
+        if isinstance(ckpt, dict) and "temperature" in ckpt:
+            model.temperature.fill_(float(ckpt["temperature"]))
     model.to(device).eval()
     tfm = T.Compose([T.Resize((224, 224), antialias=True), T.ToTensor()])
 
@@ -43,9 +45,9 @@ def build(checkpoint: str | None, zeroshot: bool, device: torch.device):
         image = image.convert("RGB")
         if transform_name != "clean":
             for variants in PROTOCOL.values():
-                for name, fn in variants:
-                    if name == transform_name:
-                        image = fn(image)
+                for op in variants:
+                    if op.name == transform_name:
+                        image = op.fn(image)
                         break
         x = tfm(image).unsqueeze(0).to(device)
         if use_zeroshot:
@@ -66,7 +68,9 @@ def build(checkpoint: str | None, zeroshot: bool, device: torch.device):
             detail = "\n".join(f"{n}: {v:.4f}" for n, v in zip(STAT_NAMES, stats))
         return image, "\n".join(lines), detail
 
-    names = ["clean"] + [n for variants in PROTOCOL.values() for n, _ in variants if n != "clean"]
+    names = ["clean"] + [
+        op.name for variants in PROTOCOL.values() for op in variants if op.name != "clean"
+    ]
     demo = gr.Interface(
         fn=predict,
         inputs=[

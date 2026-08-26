@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import random
+from dataclasses import dataclass
 from typing import Callable
 
 import numpy as np
@@ -16,6 +17,13 @@ RESIZE_SCALES = (0.5, 0.25)
 NOISE_SIGMAS = (0.02, 0.05, 0.10)
 COLOR_JITTER = 0.20
 CENTER_CROP = 0.80
+
+
+@dataclass(frozen=True)
+class ProtocolOp:
+    name: str
+    fn: Callable[[Image.Image], Image.Image]
+    severity: float  # 0 = clean / intact traces, 1 = heavily degraded
 
 
 def _to_rgb(img: Image.Image) -> Image.Image:
@@ -69,42 +77,72 @@ def center_crop(img: Image.Image, fraction: float = CENTER_CROP) -> Image.Image:
     return cropped.resize((w, h), Image.Resampling.BILINEAR)
 
 
-PROTOCOL: dict[str, list[tuple[str, Callable[[Image.Image], Image.Image]]]] = {
-    "clean": [("clean", lambda im: _to_rgb(im))],
-    "jpeg": [(f"jpeg_q{q}", lambda im, q=q: jpeg_compress(im, q)) for q in JPEG_QUALITIES],
-    "blur": [(f"blur_s{s}", lambda im, s=s: gaussian_blur(im, s)) for s in BLUR_SIGMAS],
-    "resize": [(f"resize_x{s}", lambda im, s=s: down_up_resize(im, s)) for s in RESIZE_SCALES],
-    "noise": [(f"noise_s{s}", lambda im, s=s: gaussian_noise(im, s)) for s in NOISE_SIGMAS],
-    "color_jitter": [("color_jitter", color_jitter)],
-    "center_crop": [("center_crop", center_crop)],
+# Severity maps roughly to how much forensic traces are expected to die.
+PROTOCOL: dict[str, list[ProtocolOp]] = {
+    "clean": [ProtocolOp("clean", lambda im: _to_rgb(im), 0.0)],
+    "jpeg": [
+        ProtocolOp(f"jpeg_q{q}", (lambda im, q=q: jpeg_compress(im, q)), sev)
+        for q, sev in zip(JPEG_QUALITIES, (0.25, 0.5, 0.75, 1.0))
+    ],
+    "blur": [
+        ProtocolOp(f"blur_s{s}", (lambda im, s=s: gaussian_blur(im, s)), sev)
+        for s, sev in zip(BLUR_SIGMAS, (0.35, 0.7, 1.0))
+    ],
+    "resize": [
+        ProtocolOp(f"resize_x{s}", (lambda im, s=s: down_up_resize(im, s)), sev)
+        for s, sev in zip(RESIZE_SCALES, (0.55, 1.0))
+    ],
+    "noise": [
+        ProtocolOp(f"noise_s{s}", (lambda im, s=s: gaussian_noise(im, s)), sev)
+        for s, sev in zip(NOISE_SIGMAS, (0.3, 0.65, 1.0))
+    ],
+    "color_jitter": [ProtocolOp("color_jitter", color_jitter, 0.25)],
+    "center_crop": [ProtocolOp("center_crop", center_crop, 0.2)],
 }
 
 
+def iter_protocol_ops() -> list[ProtocolOp]:
+    return [op for variants in PROTOCOL.values() for op in variants]
+
+
 def apply_named(img: Image.Image, name: str) -> Image.Image:
-    for variants in PROTOCOL.values():
-        for vname, fn in variants:
-            if vname == name:
-                return fn(img)
+    for op in iter_protocol_ops():
+        if op.name == name:
+            return op.fn(img)
     raise KeyError(f"Unknown transform {name}")
 
 
-def random_protocol_transform(img: Image.Image) -> Image.Image:
+def severity_for(name: str) -> float:
+    for op in iter_protocol_ops():
+        if op.name == name:
+            return op.severity
+    raise KeyError(f"Unknown transform {name}")
+
+
+def random_protocol_transform(img: Image.Image) -> tuple[Image.Image, str, float]:
     """Sample one official transform family, then one parameter setting."""
     family = random.choice([k for k in PROTOCOL if k != "clean"])
-    _name, fn = random.choice(PROTOCOL[family])
-    return fn(img)
+    op = random.choice(PROTOCOL[family])
+    return op.fn(img), op.name, op.severity
 
 
 class ProtocolTrainTransform:
-    """Match the evaluation protocol at train time (the main robustness lever)."""
+    """Match the evaluation protocol at train time (the main robustness lever).
+
+    Returns (image, transform_name, severity). Severity is max over stacked ops.
+    """
 
     def __init__(self, p: float = 0.85):
         self.p = p
 
-    def __call__(self, img: Image.Image) -> Image.Image:
+    def __call__(self, img: Image.Image) -> tuple[Image.Image, str, float]:
         img = _to_rgb(img)
+        name = "clean"
+        severity = 0.0
         if random.random() < self.p:
-            img = random_protocol_transform(img)
+            img, name, severity = random_protocol_transform(img)
         if random.random() < 0.3:
-            img = random_protocol_transform(img)
-        return img
+            img, name2, sev2 = random_protocol_transform(img)
+            name = f"{name}+{name2}" if name != "clean" else name2
+            severity = max(severity, sev2)
+        return img, name, float(severity)
