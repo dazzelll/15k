@@ -29,6 +29,13 @@ def infer_label_from_path(path: Path) -> int | None:
 
 
 class AIGCFolderDataset(Dataset):
+    """Returns (x_clean, x_transformed, label, severity, path).
+
+    At train time, x_transformed is protocol-augmented and severity is the
+    known degradation strength in [0, 1]. At eval time both tensors are clean
+    and severity is 0.
+    """
+
     def __init__(
         self,
         root: str | Path,
@@ -62,7 +69,11 @@ class AIGCFolderDataset(Dataset):
     def __getitem__(self, idx: int):
         path, label = self.samples[idx]
         img = Image.open(path).convert("RGB")
+        x_clean = self.to_tensor(img)
         if self.protocol is not None:
-            img = self.protocol(img)
-        x = self.to_tensor(img)
-        return x, float(label), str(path)
+            img_t, _name, severity = self.protocol(img)
+            x_t = self.to_tensor(img_t)
+        else:
+            x_t = x_clean
+            severity = 0.0
+        return x_clean, x_t, float(label), float(severity), str(path)
