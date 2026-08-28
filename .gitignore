@@ -13,3 +13,6 @@ checkpoints/
 wandb/
 hf_cache/
 .cache/
+make_subset.py
+data/train_small/
+data/val_small/
