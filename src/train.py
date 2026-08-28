@@ -135,7 +135,15 @@ def main() -> None:
 
     for epoch in range(1, cfg["epochs"] + 1):
         model.train()
-        running = {"total": 0.0, "cls": 0.0, "cons": 0.0, "gate": 0.0}
+        running = {
+            "total": 0.0,
+            "cls": 0.0,
+            "cons": 0.0,
+            "gate": 0.0,
+            "gate_clean_mean": 0.0,
+            "gate_t_mean": 0.0,
+            "severity_mean": 0.0,
+        }
         n = 0
         pbar = tqdm(train_loader, desc=f"epoch {epoch}/{cfg['epochs']}")
         for x_clean, x_t, y, severity, _path in pbar:
@@ -166,10 +174,14 @@ def main() -> None:
             running["cls"] += float(cls_loss.item()) * bs
             running["cons"] += float(cons_loss.item()) * bs
             running["gate"] += float(gate_loss.item()) * bs
+            with torch.no_grad():
+                running["gate_clean_mean"] += float(out_c.gate.mean().item()) * bs
+                running["gate_t_mean"] += float(out_t.gate.mean().item()) * bs
+                running["severity_mean"] += float(severity.mean().item()) * bs
             n += bs
             pbar.set_postfix(
                 loss=f"{running['total'] / max(n, 1):.4f}",
-                gate=f"{running['gate'] / max(n, 1):.3f}",
+                gate_loss=f"{running['gate'] / max(n, 1):.3f}",
             )
 
         metrics = evaluate(model, val_clean_loader, device)
@@ -178,10 +190,15 @@ def main() -> None:
         metrics["train_cls"] = running["cls"] / max(n, 1)
         metrics["train_cons"] = running["cons"] / max(n, 1)
         metrics["train_gate"] = running["gate"] / max(n, 1)
+        metrics["gate_clean_mean"] = running["gate_clean_mean"] / max(n, 1)
+        metrics["gate_t_mean"] = running["gate_t_mean"] / max(n, 1)
+        metrics["severity_mean"] = running["severity_mean"] / max(n, 1)
         history.append(metrics)
         print(
             f"val acc={metrics['acc']:.4f} auc={metrics['auc']:.4f} "
-            f"ap={metrics['ap']:.4f} ece={metrics['ece']:.4f}"
+            f"ap={metrics['ap']:.4f} ece={metrics['ece']:.4f}  "
+            f"gate_clean={metrics['gate_clean_mean']:.3f} "
+            f"gate_t={metrics['gate_t_mean']:.3f} sev={metrics['severity_mean']:.3f}"
         )
 
         payload = {
@@ -192,8 +209,10 @@ def main() -> None:
             "temperature": float(model.temperature.item()),
         }
         torch.save(payload, ckpt_dir / "last.pt")
-        if metrics["auc"] >= best_auc or np.isnan(metrics["auc"]):
-            best_auc = metrics["auc"] if not np.isnan(metrics["auc"]) else best_auc
+        # Only overwrite best.pt on a genuine, comparable AUC improvement —
+        # NaN AUC (e.g. single-class val split) must never count as "best".
+        if not np.isnan(metrics["auc"]) and metrics["auc"] >= best_auc:
+            best_auc = metrics["auc"]
             torch.save(payload, ckpt_dir / "best.pt")
 
     # Temperature scaling on protocol-augmented val (matches deployment mix).
