@@ -49,9 +49,13 @@ class ForgeGate(nn.Module):
         super().__init__()
         import open_clip
 
-        self.clip_arch = clip_model
+        clip_model_name = (
+            clip_model if clip_pretrained != "openai" or clip_model.endswith("-quickgelu")
+            else f"{clip_model}-quickgelu"
+        )
+        self.clip_arch = clip_model_name
         self.clip, _, _ = open_clip.create_model_and_transforms(
-            clip_model, pretrained=clip_pretrained
+            clip_model_name, pretrained=clip_pretrained
         )
         self.clip.eval()
         self.freeze_clip = freeze_clip
