@@ -159,13 +159,17 @@ def main() -> None:
                 cons_loss = F.mse_loss(
                     torch.sigmoid(out_c.logit), torch.sigmoid(out_t.logit)
                 )
-                # Trust forensics when severity is low; clean target is 1.
-                target_c = torch.ones_like(out_c.gate)
-                target_t = (1.0 - severity).clamp(0.0, 1.0)
-                gate_loss = F.binary_cross_entropy(
-                    out_c.gate, target_c
-                ) + F.binary_cross_entropy(out_t.gate, target_t)
-                loss = cls_loss + alpha * cons_loss + beta * gate_loss
+
+            # Gate BCE must run in plain fp32 — binary_cross_entropy on raw
+            # probabilities is unsafe under autocast (only *_with_logits is safe there).
+            gate_clean = out_c.gate.float()
+            gate_t_out = out_t.gate.float()
+            target_c = torch.ones_like(gate_clean)
+            target_t = (1.0 - severity).clamp(0.0, 1.0).float()
+            gate_loss = F.binary_cross_entropy(gate_clean, target_c) + F.binary_cross_entropy(
+                gate_t_out, target_t
+            )
+            loss = cls_loss + alpha * cons_loss + beta * gate_loss
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
