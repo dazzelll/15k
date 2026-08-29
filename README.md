@@ -72,7 +72,7 @@ python evaluate.py --data_dir data/val --checkpoint checkpoints/best.pt --ablati
 # Adds semantic-only (g=0) / forensic-always (g=1) / full ForgeGate rows + ablation_insight.json
 ```
 
-Training uses paired clean/transformed forwards with consistency loss and an explicit gate regularizer toward `1 - severity`. Temperature scaling is fit on the protocol-augmented val set after the last epoch.
+Training uses paired clean/transformed forwards with consistency loss and an explicit gate regularizer toward `1 - severity`. `best.pt` is selected on **protocol-augmented val AUC** (same mix as training, frozen per image). Temperature scaling is fit on that mix after the best epoch.
 
 ## Error analysis
 

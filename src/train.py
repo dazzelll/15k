@@ -28,25 +28,31 @@ def set_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
-@torch.no_grad()
-def evaluate(model: ForgeGate, loader: DataLoader, device: torch.device) -> dict:
-    model.eval()
-    ys, ps = [], []
-    for x_clean, _x_t, y, _sev, _path in loader:
-        x = x_clean.to(device)
-        out = model(x)
-        ys.append(y.numpy())
-        ps.append(out.prob.cpu().numpy())
-    y = np.concatenate(ys)
-    p = np.concatenate(ps)
+def _cls_metrics(y: np.ndarray, p: np.ndarray) -> dict:
     pred = (p >= 0.5).astype(np.float32)
-    metrics = {
+    return {
         "acc": float(accuracy_score(y, pred)),
         "ap": float(average_precision_score(y, p)) if len(np.unique(y)) > 1 else float("nan"),
         "auc": float(roc_auc_score(y, p)) if len(np.unique(y)) > 1 else float("nan"),
         "ece": expected_calibration_error(p, y),
     }
-    return metrics
+
+
+@torch.no_grad()
+def evaluate_clean_and_protocol(
+    model: ForgeGate, loader: DataLoader, device: torch.device
+) -> tuple[dict, dict]:
+    """One val pass: clean images and the frozen protocol mix."""
+    model.eval()
+    ys, p_clean, p_prot = [], [], []
+    for x_clean, x_t, y, _sev, _path in loader:
+        out_c = model(x_clean.to(device))
+        out_t = model(x_t.to(device))
+        ys.append(y.numpy())
+        p_clean.append(out_c.prob.cpu().numpy())
+        p_prot.append(out_t.prob.cpu().numpy())
+    y = np.concatenate(ys)
+    return _cls_metrics(y, np.concatenate(p_clean)), _cls_metrics(y, np.concatenate(p_prot))
 
 
 def main() -> None:
@@ -74,15 +80,14 @@ def main() -> None:
         train=True,
         protocol_aug_prob=cfg.get("protocol_aug_prob", 0.85),
     )
-    # Protocol-augmented val for consistency/gate monitoring + calibration.
+    # Protocol-augmented val for selection, consistency/gate monitoring, and calibration.
+    # protocol_seed freezes the per-image mix so epoch-to-epoch AUC is comparable.
     val_ds = AIGCFolderDataset(
         args.val_dir,
         image_size=cfg["image_size"],
         train=True,
         protocol_aug_prob=cfg.get("protocol_aug_prob", 0.85),
-    )
-    val_clean_ds = AIGCFolderDataset(
-        args.val_dir, image_size=cfg["image_size"], train=False
+        protocol_seed=cfg.get("seed", 42),
     )
     train_loader = DataLoader(
         train_ds,
@@ -93,12 +98,6 @@ def main() -> None:
     )
     val_loader = DataLoader(
         val_ds,
-        batch_size=cfg["batch_size"],
-        shuffle=False,
-        num_workers=cfg.get("num_workers", 2),
-    )
-    val_clean_loader = DataLoader(
-        val_clean_ds,
         batch_size=cfg["batch_size"],
         shuffle=False,
         num_workers=cfg.get("num_workers", 2),
@@ -188,19 +187,31 @@ def main() -> None:
                 gate_loss=f"{running['gate'] / max(n, 1):.3f}",
             )
 
-        metrics = evaluate(model, val_clean_loader, device)
-        metrics["epoch"] = epoch
-        metrics["train_loss"] = running["total"] / max(n, 1)
-        metrics["train_cls"] = running["cls"] / max(n, 1)
-        metrics["train_cons"] = running["cons"] / max(n, 1)
-        metrics["train_gate"] = running["gate"] / max(n, 1)
-        metrics["gate_clean_mean"] = running["gate_clean_mean"] / max(n, 1)
-        metrics["gate_t_mean"] = running["gate_t_mean"] / max(n, 1)
-        metrics["severity_mean"] = running["severity_mean"] / max(n, 1)
+        clean_m, prot_m = evaluate_clean_and_protocol(model, val_loader, device)
+        metrics = {
+            "epoch": epoch,
+            "acc": clean_m["acc"],
+            "auc": clean_m["auc"],
+            "ap": clean_m["ap"],
+            "ece": clean_m["ece"],
+            "protocol_acc": prot_m["acc"],
+            "protocol_auc": prot_m["auc"],
+            "protocol_ap": prot_m["ap"],
+            "protocol_ece": prot_m["ece"],
+            "train_loss": running["total"] / max(n, 1),
+            "train_cls": running["cls"] / max(n, 1),
+            "train_cons": running["cons"] / max(n, 1),
+            "train_gate": running["gate"] / max(n, 1),
+            "gate_clean_mean": running["gate_clean_mean"] / max(n, 1),
+            "gate_t_mean": running["gate_t_mean"] / max(n, 1),
+            "severity_mean": running["severity_mean"] / max(n, 1),
+        }
         history.append(metrics)
         print(
-            f"val acc={metrics['acc']:.4f} auc={metrics['auc']:.4f} "
+            f"val clean acc={metrics['acc']:.4f} auc={metrics['auc']:.4f} "
             f"ap={metrics['ap']:.4f} ece={metrics['ece']:.4f}  "
+            f"protocol acc={metrics['protocol_acc']:.4f} auc={metrics['protocol_auc']:.4f} "
+            f"ap={metrics['protocol_ap']:.4f}  "
             f"gate_clean={metrics['gate_clean_mean']:.3f} "
             f"gate_t={metrics['gate_t_mean']:.3f} sev={metrics['severity_mean']:.3f}"
         )
@@ -213,10 +224,10 @@ def main() -> None:
             "temperature": float(model.temperature.item()),
         }
         torch.save(payload, ckpt_dir / "last.pt")
-        # Only overwrite best.pt on a genuine, comparable AUC improvement —
+        # Select on protocol-aug val AUC (the robustness objective), not clean AUC.
         # NaN AUC (e.g. single-class val split) must never count as "best".
-        if not np.isnan(metrics["auc"]) and metrics["auc"] >= best_auc:
-            best_auc = metrics["auc"]
+        if not np.isnan(prot_m["auc"]) and prot_m["auc"] >= best_auc:
+            best_auc = prot_m["auc"]
             torch.save(payload, ckpt_dir / "best.pt")
 
     # Temperature scaling on protocol-augmented val (matches deployment mix).
@@ -229,11 +240,20 @@ def main() -> None:
         logits, labels = collect_logits(model, val_loader, device, use_transformed=True)
         t_star = fit_temperature(logits.to(device), labels.to(device))
         model.temperature.fill_(t_star)
-        cal_metrics = evaluate(model, val_clean_loader, device)
-        cal_metrics["temperature"] = t_star
+        cal_clean, cal_prot = evaluate_clean_and_protocol(model, val_loader, device)
+        cal_metrics = {
+            **cal_clean,
+            "protocol_acc": cal_prot["acc"],
+            "protocol_auc": cal_prot["auc"],
+            "protocol_ap": cal_prot["ap"],
+            "protocol_ece": cal_prot["ece"],
+            "temperature": t_star,
+        }
         print(
             f"temperature={t_star:.4f}  "
-            f"clean val ece={cal_metrics['ece']:.4f} auc={cal_metrics['auc']:.4f}"
+            f"clean val ece={cal_metrics['ece']:.4f} auc={cal_metrics['auc']:.4f}  "
+            f"protocol val ece={cal_metrics['protocol_ece']:.4f} "
+            f"auc={cal_metrics['protocol_auc']:.4f}"
         )
         payload = {
             "model": model.state_dict(),
