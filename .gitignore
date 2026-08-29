@@ -5,8 +5,6 @@ __pycache__/
 *.egg-info/
 .DS_Store
 data/
-outputs/
-checkpoints/
 *.pt
 *.pth
 *.ckpt
