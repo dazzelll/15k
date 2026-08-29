@@ -93,6 +93,8 @@ python infer.py --input_dir path/to/images --output outputs/preds.json --zerosho
 ```bash
 python evaluate.py --data_dir data/val --checkpoint checkpoints/best.pt --output outputs/robustness.csv
 # Also writes outputs/gate_vs_severity.png and outputs/reliability_clean.png
+# Automatically calculates and displays Final Score: 0.50 * AUC_clean + 0.50 * AUC_robust
+# Generates key_conditions.csv with: Clean, JPEG q30, Blur σ=2, Crop 80%, Resize 50%, Unseen gen.
 
 python evaluate.py --data_dir data/val --checkpoint checkpoints/best.pt --ablation --output outputs/ablation.csv
 # Adds semantic-only (g=0) / forensic-always (g=1) / full ForgeGate rows + ablation_insight.json
