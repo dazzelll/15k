@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Download CIFAKE with KaggleHub, SID_Set from Hugging Face, and WildFake from ModelScope.
-Point data/train + data/val at them.
+"""Download CIFAKE with KaggleHub, SID_Set from Hugging Face, WildFake from ModelScope.
+Point data/train + data/val at them. Also supports AIGC-Detection-Benchmark for cross-generator testing.
 
 Auth (first match wins):
   1. .env in the repo root with KAGGLE_USERNAME and KAGGLE_KEY
@@ -11,6 +11,7 @@ Auth (first match wins):
   python train.py --train_dir data/train --val_dir data/val --config configs/default.yaml
   
 Note: WildFake excludes validation subset (COCO val2017 + DALL·E Advanced) from training data.
+AIGC-Detection-Benchmark is Apache 2.0 licensed and designed for cross-generator evaluation.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from pathlib import Path
 CIFAKE_HANDLE = "birdy654/cifake-real-and-ai-generated-synthetic-images"
 SID_SET_HANDLE = "saberzl/SID_Set"
 WILDFAKE_HANDLE = "hy2628982280/WildFake"
+AIGC_BENCHMARK_HANDLE = "TheKernel01/AIGC-Detection-Benchmark"
 
 
 def load_dotenv(path: Path) -> None:
@@ -64,6 +66,103 @@ def link_split(src: Path, dest: Path, force: bool) -> None:
         dest.unlink()
     dest.symlink_to(src.resolve())
     print(f"linked {dest} -> {src}")
+
+
+def download_aigc_benchmark(repo_root: Path, sample_per_generator: int = 100) -> Path:
+    """Download AIGC-Detection-Benchmark from Hugging Face for cross-generator testing.
+    
+    Samples from 17 different AI generators (ADM, BigGAN, CycleGAN, DALLE2, GauGAN, GLIDE,
+    Midjourney, ProGAN, SD14, SD15, SDXL, StarGAN, StyleGAN, StyleGAN2, VQDM, 
+    WhichFaceIsReal, Wukong) plus real images.
+    
+    Args:
+        repo_root: Root directory of the repository
+        sample_per_generator: Number of images to sample per generator (default: 100 for testing)
+    
+    Returns:
+        Path to the processed AIGC benchmark test data
+    """
+    from datasets import load_dataset
+    from PIL import Image
+    
+    print(f"Downloading AIGC-Detection-Benchmark from Hugging Face...")
+    
+    # Load dataset (only has test split)
+    dataset = load_dataset(AIGC_BENCHMARK_HANDLE, split="test")
+    
+    # Create output directory structure
+    output_dir = repo_root / "data" / "aigc_benchmark"
+    real_dir = output_dir / "REAL"
+    fake_dir = output_dir / "FAKE"
+    
+    # Clean up existing directories
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    
+    real_dir.mkdir(parents=True, exist_ok=True)
+    fake_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Generator names from the dataset
+    generator_names = [
+        "Real", "ADM", "BigGAN", "CycleGAN", "DALLE2", "GauGAN", "GLIDE", 
+        "Midjourney", "ProGAN", "SD14", "SD15", "SDXL", "StarGAN", 
+        "StyleGAN", "StyleGAN2", "VQDM", "WhichFaceIsReal", "Wukong"
+    ]
+    
+    # Track samples per generator
+    generator_counts = {name: 0 for name in generator_names}
+    real_count = 0
+    fake_count = 0
+    
+    print(f"Sampling {sample_per_generator} images per generator from AIGC-Detection-Benchmark...")
+    
+    for item in dataset:
+        # Check if we've sampled enough from all generators
+        if all(count >= sample_per_generator for count in generator_counts.values()):
+            break
+            
+        try:
+            image = item["image"]
+            label = item["label"]  # 0 = real, 1 = fake
+            generator_id = item["generator"]
+            generator_name = generator_names[generator_id]
+            
+            # Skip if we've already sampled enough from this generator
+            if generator_counts[generator_name] >= sample_per_generator:
+                continue
+            
+            # Save image
+            if image is not None:
+                # Convert to RGB if needed
+                if image.mode != "RGB":
+                    image = image.convert("RGB")
+                
+                # Determine output directory based on label
+                if label == 0:
+                    target_dir = real_dir
+                    real_count += 1
+                else:
+                    target_dir = fake_dir
+                    fake_count += 1
+                
+                # Save with generator-specific filename
+                image_path = target_dir / f"aigc_{generator_name}_{generator_counts[generator_name]}.jpg"
+                image.save(image_path, "JPEG", quality=95)
+                
+                generator_counts[generator_name] += 1
+                
+                if (real_count + fake_count) % 500 == 0:
+                    print(f"Processed {real_count} REAL and {fake_count} FAKE images...")
+                    
+        except Exception as e:
+            print(f"Error processing item: {e}")
+            continue
+    
+    print(f"Downloaded AIGC-Detection-Benchmark: {real_count} REAL images, {fake_count} FAKE images")
+    print(f"Samples per generator: {generator_counts}")
+    print(f"AIGC benchmark data saved to: {output_dir}")
+    
+    return output_dir
 
 
 def download_sid_set(repo_root: Path, sample_size: int = 5000) -> Path:
@@ -377,6 +476,17 @@ def main() -> None:
         help="Download WildFake dataset (excludes validation subset from training).",
     )
     parser.add_argument(
+        "--aigc-benchmark",
+        action="store_true",
+        help="Download AIGC-Detection-Benchmark for cross-generator testing (17 different AI generators).",
+    )
+    parser.add_argument(
+        "--aigc-sample",
+        type=int,
+        default=100,
+        help="Number of images to sample per generator from AIGC-Detection-Benchmark (default: 100 for testing).",
+    )
+    parser.add_argument(
         "--merge",
         action="store_true",
         help="Merge all downloaded datasets into single data/train directory.",
@@ -418,6 +528,15 @@ def main() -> None:
             print(f"Failed to download WildFake: {e}")
             print("Continuing with other datasets...")
 
+    # Download AIGC-Detection-Benchmark if requested
+    aigc_test_dir = None
+    if args.aigc_benchmark:
+        try:
+            aigc_test_dir = download_aigc_benchmark(args.repo_root, args.aigc_sample)
+        except Exception as e:
+            print(f"Failed to download AIGC-Detection-Benchmark: {e}")
+            print("Continuing without AIGC benchmark...")
+
     if args.no_link:
         return
 
@@ -438,6 +557,10 @@ def main() -> None:
         if wildfake_train_dir:
             link_split(wildfake_train_dir, args.repo_root / "data" / "wildfake_train", args.force)
             print("Note: WildFake data in data/wildfake_train")
+        
+        if aigc_test_dir:
+            link_split(aigc_test_dir, args.repo_root / "data" / "aigc_benchmark", args.force)
+            print("Note: AIGC-Detection-Benchmark test data in data/aigc_benchmark")
         
         if sid_train_dir or wildfake_train_dir:
             print("Use --merge flag to combine all datasets into data/train")
