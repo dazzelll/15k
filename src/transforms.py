@@ -11,6 +11,10 @@ Design (per team discussion):
   since most real reposts aren't maximally destroyed.
 - Eval-time fixed protocol (PROTOCOL / apply_named / severity_for) is
   UNCHANGED — judges need reproducible, named conditions, not randomness.
+- Both the pipeline ops and the fixed eval ops accept an optional `rng`
+  (a random.Random instance) so a specific sample's augmentation can be
+  reproduced deterministically when needed; the module-level `random`
+  state is used when rng is not supplied.
 """
 
 from __future__ import annotations
@@ -23,6 +27,21 @@ from typing import Callable
 import numpy as np
 import torch
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+
+
+# ---------------------------------------------------------------------------
+# Fixed-protocol constants — defined up front so nothing below references
+# them before they exist (this ordering bug previously crashed the module
+# on import).
+# ---------------------------------------------------------------------------
+
+JPEG_QUALITIES = (90, 70, 50, 30)
+BLUR_SIGMAS = (0.5, 1.0, 2.0)
+RESIZE_SCALES = (0.5, 0.25)
+NOISE_SIGMAS = (0.02, 0.05, 0.10)
+COLOR_JITTER = 0.20
+CENTER_CROP = 0.80
+SCREENSHOT_VARIANTS = ((0.92, 90), (0.85, 75), (0.75, 60))
 
 
 # ---------------------------------------------------------------------------
@@ -60,6 +79,8 @@ def down_up_resize(img: Image.Image, scale: float) -> Image.Image:
 def gaussian_noise(
     img: Image.Image, sigma: float, rng: random.Random | None = None
 ) -> Image.Image:
+    if sigma <= 0:
+        return _to_rgb(img)
     arr = np.asarray(_to_rgb(img), dtype=np.float32) / 255.0
     if rng is None:
         noise = np.random.normal(0.0, sigma, arr.shape).astype(np.float32)
@@ -71,9 +92,11 @@ def gaussian_noise(
 
 
 def color_jitter(
-    img: Image.Image, amount: float = COLOR_JITTER, rng: random.Random | None = None
+    img: Image.Image, amount: float, rng: random.Random | None = None
 ) -> Image.Image:
     img = _to_rgb(img)
+    if amount <= 0:
+        return img
     r = rng if rng is not None else random
     b = 1.0 + r.uniform(-amount, amount)
     c = 1.0 + r.uniform(-amount, amount)
@@ -140,7 +163,9 @@ def measure_severity(original: Image.Image, transformed: Image.Image) -> float:
 # ---------------------------------------------------------------------------
 # Continuous-parameter single ops, for use inside pipelines below. Each
 # takes a "strength" in [0, 1] (0 = no effect, 1 = harshest realistic
-# setting) and maps it to the op's actual parameter range.
+# setting) and maps it to the op's actual parameter range. Noise and
+# color_jitter are handled separately in _apply_strength_op so rng can be
+# threaded through their internal randomness.
 # ---------------------------------------------------------------------------
 
 def _strength_jpeg(img: Image.Image, strength: float) -> Image.Image:
@@ -158,16 +183,6 @@ def _strength_resize(img: Image.Image, strength: float) -> Image.Image:
     return down_up_resize(img, scale)
 
 
-def _strength_noise(img: Image.Image, strength: float) -> Image.Image:
-    sigma = strength * 0.12
-    return gaussian_noise(img, sigma)
-
-
-def _strength_color_jitter(img: Image.Image, strength: float) -> Image.Image:
-    amount = strength * 0.35
-    return color_jitter(img, amount)
-
-
 def _strength_crop(img: Image.Image, strength: float) -> Image.Image:
     fraction = 1.0 - strength * 0.5  # strength 0 -> no crop, strength 1 -> 50% crop
     return center_crop(img, fraction)
@@ -183,18 +198,37 @@ _STRENGTH_OPS: dict[str, Callable[[Image.Image, float], Image.Image]] = {
     "jpeg": _strength_jpeg,
     "blur": _strength_blur,
     "resize": _strength_resize,
-    "noise": _strength_noise,
-    "color_jitter": _strength_color_jitter,
     "crop": _strength_crop,
     "screenshot": _strength_screenshot,
+    # "noise" and "color_jitter" are routed through _apply_strength_op below
+    # so their internal randomness can take an rng; they're not in this dict.
 }
 
 
-def _sample_strength() -> float:
+def _apply_strength_op(
+    name: str, img: Image.Image, strength: float, rng: random.Random | None
+) -> Image.Image:
+    """Route to the right strength-parameterized op, threading rng into the
+    two stochastic ones (noise, color_jitter) that need their own randomness
+    beyond the strength value itself."""
+    if name == "noise":
+        sigma = strength * 0.12
+        return gaussian_noise(img, sigma, rng=rng)
+    if name == "color_jitter":
+        amount = strength * 0.35
+        return color_jitter(img, amount, rng=rng)
+    return _STRENGTH_OPS[name](img, strength)
+
+
+_ALL_STEP_NAMES = list(_STRENGTH_OPS.keys()) + ["noise", "color_jitter"]
+
+
+def _sample_strength(rng: random.Random | None = None) -> float:
     """Skewed toward mild/moderate degradation, matching how most real
     reposts look (a few heavy-JPEG-cycles images exist, but they're the
     minority, not the median case)."""
-    return random.betavariate(2.0, 4.0)  # mean ~0.33, long tail toward 1.0
+    r = rng if rng is not None else random
+    return r.betavariate(2.0, 4.0)  # mean ~0.33, long tail toward 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +240,7 @@ def _sample_strength() -> float:
 @dataclass(frozen=True)
 class Pipeline:
     name: str
-    steps: tuple[str, ...]  # op names from _STRENGTH_OPS, applied in order
+    steps: tuple[str, ...]  # step names from _ALL_STEP_NAMES, applied in order
     weight: float
 
 
@@ -224,20 +258,27 @@ PIPELINES: list[Pipeline] = [
 _PIPELINE_WEIGHTS = [p.weight for p in PIPELINES]
 
 
-def _run_pipeline(img: Image.Image, pipeline: Pipeline) -> Image.Image:
+def _run_pipeline(
+    img: Image.Image, pipeline: Pipeline, rng: random.Random | None = None
+) -> Image.Image:
     for step in pipeline.steps:
-        strength = _sample_strength()
-        img = _STRENGTH_OPS[step](img, strength)
+        strength = _sample_strength(rng)
+        img = _apply_strength_op(step, img, strength, rng)
     return img
 
 
-def _run_random_stack(img: Image.Image, min_ops: int = 1, max_ops: int = 3) -> Image.Image:
+def _run_random_stack(
+    img: Image.Image,
+    min_ops: int = 1,
+    max_ops: int = 3,
+    rng: random.Random | None = None,
+) -> Image.Image:
     """Fallback: a few independently-chosen ops, for coverage of unusual
     combinations no named pipeline represents."""
-    names = list(_STRENGTH_OPS.keys())
-    k = random.randint(min_ops, min(max_ops, len(names)))
-    for step in random.sample(names, k):
-        img = _STRENGTH_OPS[step](img, _sample_strength())
+    r = rng if rng is not None else random
+    k = r.randint(min_ops, min(max_ops, len(_ALL_STEP_NAMES)))
+    for step in r.sample(_ALL_STEP_NAMES, k):
+        img = _apply_strength_op(step, img, _sample_strength(rng), rng)
     return img
 
 
@@ -247,6 +288,10 @@ class ProtocolTrainTransform:
     chance of a pure random op stack for coverage. Severity is measured
     empirically from actual high-frequency signal loss, not assigned.
 
+    Pass an rng (a random.Random instance) to __call__ for reproducible
+    augmentation of a specific sample; otherwise the module-level random
+    state is used.
+
     Returns (image, description, severity).
     """
 
@@ -254,17 +299,20 @@ class ProtocolTrainTransform:
         self.p = p
         self.random_stack_prob = random_stack_prob
 
-    def __call__(self, img: Image.Image) -> tuple[Image.Image, str, float]:
+    def __call__(
+        self, img: Image.Image, rng: random.Random | None = None
+    ) -> tuple[Image.Image, str, float]:
+        r = rng if rng is not None else random
         original = _to_rgb(img)
-        if random.random() >= self.p:
+        if r.random() >= self.p:
             return original, "clean", 0.0
 
-        if random.random() < self.random_stack_prob:
-            transformed = _run_random_stack(original)
+        if r.random() < self.random_stack_prob:
+            transformed = _run_random_stack(original, rng=rng)
             description = "random_stack"
         else:
-            pipeline = random.choices(PIPELINES, weights=_PIPELINE_WEIGHTS, k=1)[0]
-            transformed = _run_pipeline(original, pipeline)
+            pipeline = r.choices(PIPELINES, weights=_PIPELINE_WEIGHTS, k=1)[0]
+            transformed = _run_pipeline(original, pipeline, rng=rng)
             description = pipeline.name
 
         severity = measure_severity(original, transformed)
@@ -272,20 +320,11 @@ class ProtocolTrainTransform:
 
 
 # ---------------------------------------------------------------------------
-# FIXED eval protocol — UNCHANGED. Used for the reproducible robustness
-# table (Clean / JPEG q30 / Blur σ=2 / Crop 80% / Unseen gen.) and any
-# --ablation reporting. Do not randomize this; judges need exact, repeatable
-# named conditions.
+# FIXED eval protocol — UNCHANGED behavior. Used for the reproducible
+# robustness table (Clean / JPEG q30 / Blur σ=2 / Crop 80% / Unseen gen.)
+# and any --ablation reporting. Do not randomize this; judges need exact,
+# repeatable named conditions.
 # ---------------------------------------------------------------------------
-
-JPEG_QUALITIES = (90, 70, 50, 30)
-BLUR_SIGMAS = (0.5, 1.0, 2.0)
-RESIZE_SCALES = (0.5, 0.25)
-NOISE_SIGMAS = (0.02, 0.05, 0.10)
-COLOR_JITTER = 0.20
-CENTER_CROP = 0.80
-SCREENSHOT_VARIANTS = ((0.92, 90), (0.85, 75), (0.75, 60))
-
 
 @dataclass(frozen=True)
 class ProtocolOp:
@@ -312,8 +351,12 @@ PROTOCOL: dict[str, list[ProtocolOp]] = {
         ProtocolOp(f"noise_s{s}", (lambda im, s=s: gaussian_noise(im, s)), sev)
         for s, sev in zip(NOISE_SIGMAS, (0.3, 0.65, 1.0))
     ],
-    "color_jitter": [ProtocolOp("color_jitter", (lambda im: color_jitter(im, COLOR_JITTER)), 0.25)],
-    "center_crop": [ProtocolOp("center_crop", (lambda im: center_crop(im, CENTER_CROP)), 0.2)],
+    "color_jitter": [
+        ProtocolOp("color_jitter", (lambda im: color_jitter(im, COLOR_JITTER)), 0.25)
+    ],
+    "center_crop": [
+        ProtocolOp("center_crop", (lambda im: center_crop(im, CENTER_CROP)), 0.2)
+    ],
     "screenshot": [
         ProtocolOp(
             f"screenshot_{int(scale*100)}_{q}",
@@ -341,50 +384,3 @@ def severity_for(name: str) -> float:
         if op.name == name:
             return op.severity
     raise KeyError(f"Unknown transform {name}")
-
-
-def _apply_op(op: ProtocolOp, img: Image.Image, rng: random.Random | None) -> Image.Image:
-    """Apply a protocol op, threading rng into the two stochastic families."""
-    if rng is None:
-        return op.fn(img)
-    if op.name == "color_jitter":
-        return color_jitter(img, rng=rng)
-    if op.name.startswith("noise_s"):
-        sigma = float(op.name.split("noise_s", 1)[1])
-        return gaussian_noise(img, sigma, rng=rng)
-    return op.fn(img)
-
-
-def random_protocol_transform(
-    img: Image.Image, rng: random.Random | None = None
-) -> tuple[Image.Image, str, float]:
-    """Sample one official transform family, then one parameter setting."""
-    r = rng if rng is not None else random
-    family = r.choice([k for k in PROTOCOL if k != "clean"])
-    op = r.choice(PROTOCOL[family])
-    return _apply_op(op, img, rng), op.name, op.severity
-
-
-class ProtocolTrainTransform:
-    """Match the evaluation protocol at train time (the main robustness lever).
-
-    Returns (image, transform_name, severity). Severity is max over stacked ops.
-    """
-
-    def __init__(self, p: float = 0.85):
-        self.p = p
-
-    def __call__(
-        self, img: Image.Image, rng: random.Random | None = None
-    ) -> tuple[Image.Image, str, float]:
-        r = rng if rng is not None else random
-        img = _to_rgb(img)
-        name = "clean"
-        severity = 0.0
-        if r.random() < self.p:
-            img, name, severity = random_protocol_transform(img, rng=rng)
-        if r.random() < 0.3:
-            img, name2, sev2 = random_protocol_transform(img, rng=rng)
-            name = f"{name}+{name2}" if name != "clean" else name2
-            severity = max(severity, sev2)
-        return img, name, float(severity)
