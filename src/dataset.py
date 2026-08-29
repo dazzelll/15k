@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from random import Random
 
 from PIL import Image
 from torch.utils.data import Dataset
@@ -42,8 +43,10 @@ class AIGCFolderDataset(Dataset):
         image_size: int = 224,
         train: bool = True,
         protocol_aug_prob: float = 0.85,
+        protocol_seed: int | None = None,
     ):
         self.root = Path(root)
+        self.protocol_seed = protocol_seed
         self.samples: list[tuple[Path, int]] = []
         for path in list_images(self.root):
             label = infer_label_from_path(path)
@@ -71,7 +74,8 @@ class AIGCFolderDataset(Dataset):
         img = Image.open(path).convert("RGB")
         x_clean = self.to_tensor(img)
         if self.protocol is not None:
-            img_t, _name, severity = self.protocol(img)
+            rng = Random(self.protocol_seed + idx) if self.protocol_seed is not None else None
+            img_t, _name, severity = self.protocol(img, rng=rng)
             x_t = self.to_tensor(img_t)
         else:
             x_t = x_clean

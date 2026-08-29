@@ -39,6 +39,19 @@ def test_protocol_train_returns_severity():
     assert 0.0 <= sev <= 1.0
 
 
+def test_protocol_rng_is_deterministic():
+    import random
+
+    img = Image.fromarray((torch.rand(64, 80, 3).numpy() * 255).astype("uint8"))
+    tfm = ProtocolTrainTransform(p=1.0)
+    a = tfm(img, rng=random.Random(0))
+    b = tfm(img, rng=random.Random(0))
+    c = tfm(img, rng=random.Random(1))
+    assert a[1] == b[1] and a[2] == b[2]
+    assert list(a[0].getdata()) == list(b[0].getdata())
+    assert a[1] != c[1] or list(a[0].getdata()) != list(c[0].getdata())
+
+
 def test_forgegate_train_keeps_clip_eval():
     from src.model import ForgeGate
 
