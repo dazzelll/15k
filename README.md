@@ -36,7 +36,7 @@ data/val/fake/*.jpg
 
 Licensed public sources (train on these, not the demo split):
 
-- [CIFAKE](https://www.kaggle.com/datasets/birdy654/cifake-real-and-ai-generated-synthetic-images) — small, 32×32; good for a pipeline dry-run (images are upsampled to 224). Copy `.env.example` to `.env` and set `KAGGLE_USERNAME` / `KAGGLE_KEY` from Kaggle → Account → Create New Token (`kaggle.json`), then:
+- [CIFAKE](https://www.kaggle.com/datasets/birdy654/cifake-real-and-ai-generated-synthetic-images) — small, 32×32; good for a pipeline dry-run (images are upsampled to 224). Copy `env.example` to `.env` and set `KAGGLE_USERNAME` / `KAGGLE_KEY` from Kaggle → Account → Create New Token (`kaggle.json`), then:
 
 ```bash
 python scripts/download_cifake.py
