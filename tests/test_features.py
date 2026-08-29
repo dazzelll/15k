@@ -2,7 +2,14 @@ import torch
 from PIL import Image
 
 from src.features import degradation_stats, forensic_maps
-from src.transforms import PROTOCOL, ProtocolTrainTransform, random_protocol_transform, severity_for
+from src.transforms import (
+    PROTOCOL,
+    ProtocolTrainTransform,
+    gaussian_noise,
+    jpeg_compress,
+    measure_severity,
+    severity_for,
+)
 
 
 def test_forensic_batch_shapes():
@@ -24,10 +31,6 @@ def test_protocol_keeps_size():
             assert out.mode == "RGB"
             assert 0.0 <= op.severity <= 1.0
             assert severity_for(op.name) == op.severity
-    out, name, sev = random_protocol_transform(img)
-    assert out.size == img.size
-    assert severity_for(name) == sev
-    assert 0.0 <= sev <= 1.0
 
 
 def test_protocol_train_returns_severity():
@@ -36,6 +39,31 @@ def test_protocol_train_returns_severity():
     out, name, sev = tfm(img)
     assert out.size == img.size
     assert isinstance(name, str)
+    assert 0.0 <= sev <= 1.0
+
+
+def test_measure_severity_noise_and_jpeg():
+    import random
+
+    rng = random.Random(0)
+    arr = (torch.rand(96, 96, 3).numpy() * 255).astype("uint8")
+    img = Image.fromarray(arr)
+    noisy = gaussian_noise(img, 0.10, rng=rng)
+    jpeg = jpeg_compress(img, 30)
+    sev_noise = measure_severity(img, noisy)
+    sev_jpeg = measure_severity(img, jpeg)
+    sev_same = measure_severity(img, img)
+    assert 0.0 <= sev_noise <= 1.0
+    assert 0.0 <= sev_jpeg <= 1.0
+    assert sev_same < 1e-6
+    assert sev_noise > 0.02
+    assert sev_jpeg > 0.02
+
+
+def test_measure_severity_tiny_image_is_finite():
+    img = Image.fromarray((torch.rand(1, 1, 3).numpy() * 255).astype("uint8"))
+    other = Image.fromarray((torch.rand(1, 1, 3).numpy() * 255).astype("uint8"))
+    sev = measure_severity(img, other)
     assert 0.0 <= sev <= 1.0
 
 

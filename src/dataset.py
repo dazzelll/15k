@@ -58,7 +58,11 @@ class AIGCFolderDataset(Dataset):
                 f"No labelled images under {self.root}. "
                 "Expected folder names like real/ fake/ or REAL/ FAKE/."
             )
-        self.protocol = ProtocolTrainTransform(p=protocol_aug_prob) if train else None
+        self.protocol = (
+            ProtocolTrainTransform(p=protocol_aug_prob, measure_size=image_size)
+            if train
+            else None
+        )
         self.to_tensor = T.Compose(
             [
                 T.Resize((image_size, image_size), antialias=True),
