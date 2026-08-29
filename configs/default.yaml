@@ -10,7 +10,7 @@ clip_pretrained: openai
 freeze_clip: true
 protocol_aug_prob: 0.85
 consistency_weight: 0.5
-gate_reg_weight: 0.3
+gate_reg_weight: 1.5
 calibrate: true
 amp: true
 num_classes: 1
