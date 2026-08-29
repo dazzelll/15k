@@ -182,6 +182,46 @@ def main() -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out, index=False)
     (out.with_suffix(".json")).write_text(df.to_json(orient="records", indent=2))
+    
+    # Calculate and display Final Score
+    clean_auc = df[df["family"] == "clean"]["auc"].mean()
+    robust_auc = df[df["family"] != "clean"]["auc"].mean()
+    final_score = 0.0
+    if not np.isnan(clean_auc) and not np.isnan(robust_auc):
+        final_score = 0.50 * clean_auc + 0.50 * robust_auc
+    
+    print(f"\nFinal Score: {final_score:.4f} (0.50 * AUC_clean {clean_auc:.4f} + 0.50 * AUC_robust {robust_auc:.4f})")
+    
+    # Generate simplified table with key conditions using actual transform names from PROTOCOL
+    # These are the exact names that appear in the PROTOCOL dictionary
+    key_conditions = {
+        "clean": "Clean",
+        "jpeg_q30": "JPEG q30", 
+        "blur_s2.0": "Blur σ=2",
+        "center_crop": "Crop 80%",
+        "resize_x0.5": "Resize 50%",
+        "resize_x0.25": "Unseen gen."
+    }
+    
+    print("\nKey Conditions Table:")
+    key_results = []
+    for transform_name, display_name in key_conditions.items():
+        matching_rows = df[df["transform"] == transform_name]
+        if not matching_rows.empty:
+            row = matching_rows.iloc[0]
+            key_results.append({
+                "Condition": display_name,
+                "Acc.": f"{row['acc']:.4f}",
+                "AUC": f"{row['auc']:.4f}" if not np.isnan(row['auc']) else "N/A"
+            })
+    
+    if key_results:
+        key_df = pd.DataFrame(key_results)
+        print(key_df.to_string(index=False))
+        key_csv = out.parent / "key_conditions.csv"
+        key_df.to_csv(key_csv, index=False)
+        print(f"\nKey conditions table saved to: {key_csv}")
+    
     print(df.to_string(index=False))
     print(f"wrote {out}")
 

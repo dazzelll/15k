@@ -134,7 +134,7 @@ def main() -> None:
 
     ckpt_dir = Path(cfg.get("checkpoint_dir", "checkpoints"))
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    best_auc = -1.0
+    best_final_score = -1.0
     history = []
 
     for epoch in range(1, cfg["epochs"] + 1):
@@ -193,6 +193,12 @@ def main() -> None:
             )
 
         clean_m, prot_m = evaluate_clean_and_protocol(model, val_loader, device)
+        
+        # Calculate Final Score: 0.50 * AUC_clean + 0.50 * AUC_robust
+        final_score = 0.0
+        if not np.isnan(clean_m["auc"]) and not np.isnan(prot_m["auc"]):
+            final_score = 0.50 * clean_m["auc"] + 0.50 * prot_m["auc"]
+        
         metrics = {
             "epoch": epoch,
             "acc": clean_m["acc"],
@@ -203,6 +209,7 @@ def main() -> None:
             "protocol_auc": prot_m["auc"],
             "protocol_ap": prot_m["ap"],
             "protocol_ece": prot_m["ece"],
+            "final_score": final_score,
             "train_loss": running["total"] / max(n, 1),
             "train_cls": running["cls"] / max(n, 1),
             "train_cons": running["cons"] / max(n, 1),
@@ -217,6 +224,7 @@ def main() -> None:
             f"ap={metrics['ap']:.4f} ece={metrics['ece']:.4f}  "
             f"protocol acc={metrics['protocol_acc']:.4f} auc={metrics['protocol_auc']:.4f} "
             f"ap={metrics['protocol_ap']:.4f}  "
+            f"final_score={metrics['final_score']:.4f}  "
             f"gate_clean={metrics['gate_clean_mean']:.3f} "
             f"gate_t={metrics['gate_t_mean']:.3f} sev={metrics['severity_mean']:.3f}"
         )
@@ -229,9 +237,10 @@ def main() -> None:
             "temperature": float(model.temperature.item()),
         }
         torch.save(payload, ckpt_dir / "last.pt")
-
-        if not np.isnan(prot_m["auc"]) and prot_m["auc"] >= best_auc:
-            best_auc = prot_m["auc"]
+        # Select on Final Score: 0.50 * AUC_clean + 0.50 * AUC_robust
+        # NaN AUC (e.g. single-class val split) must never count as "best".
+        if not np.isnan(final_score) and final_score >= best_final_score:
+            best_final_score = final_score
             torch.save(payload, ckpt_dir / "best.pt")
 
     if cfg.get("calibrate", True):
@@ -244,19 +253,27 @@ def main() -> None:
         t_star = fit_temperature(logits.to(device), labels.to(device))
         model.temperature.fill_(t_star)
         cal_clean, cal_prot = evaluate_clean_and_protocol(model, val_loader, device)
+        
+        # Calculate Final Score for calibrated model
+        cal_final_score = 0.0
+        if not np.isnan(cal_clean["auc"]) and not np.isnan(cal_prot["auc"]):
+            cal_final_score = 0.50 * cal_clean["auc"] + 0.50 * cal_prot["auc"]
+        
         cal_metrics = {
             **cal_clean,
             "protocol_acc": cal_prot["acc"],
             "protocol_auc": cal_prot["auc"],
             "protocol_ap": cal_prot["ap"],
             "protocol_ece": cal_prot["ece"],
+            "final_score": cal_final_score,
             "temperature": t_star,
         }
         print(
             f"temperature={t_star:.4f}  "
             f"clean val ece={cal_metrics['ece']:.4f} auc={cal_metrics['auc']:.4f}  "
             f"protocol val ece={cal_metrics['protocol_ece']:.4f} "
-            f"auc={cal_metrics['protocol_auc']:.4f}"
+            f"auc={cal_metrics['protocol_auc']:.4f}  "
+            f"final_score={cal_metrics['final_score']:.4f}"
         )
         payload = {
             "model": model.state_dict(),
