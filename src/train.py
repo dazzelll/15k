@@ -46,8 +46,8 @@ def evaluate_clean_and_protocol(
     model.eval()
     ys, p_clean, p_prot = [], [], []
     for x_clean, x_t, y, _sev, _path in loader:
-        out_c = model(x_clean.to(device))
-        out_t = model(x_t.to(device))
+        out_c = model(x_clean.to(device, non_blocking=True))
+        out_t = model(x_t.to(device, non_blocking=True))
         ys.append(y.numpy())
         p_clean.append(out_c.prob.cpu().numpy())
         p_prot.append(out_t.prob.cpu().numpy())
@@ -80,8 +80,6 @@ def main() -> None:
         train=True,
         protocol_aug_prob=cfg.get("protocol_aug_prob", 0.85),
     )
-    # Protocol-augmented val for selection, consistency/gate monitoring, and calibration.
-    # protocol_seed freezes the per-image mix so epoch-to-epoch AUC is comparable.
     val_ds = AIGCFolderDataset(
         args.val_dir,
         image_size=cfg["image_size"],
@@ -89,18 +87,25 @@ def main() -> None:
         protocol_aug_prob=cfg.get("protocol_aug_prob", 0.85),
         protocol_seed=cfg.get("seed", 42),
     )
+
+    num_workers = cfg.get("num_workers", 4)
     train_loader = DataLoader(
         train_ds,
         batch_size=cfg["batch_size"],
         shuffle=True,
-        num_workers=cfg.get("num_workers", 2),
+        num_workers=num_workers,
         pin_memory=device.type == "cuda",
+        persistent_workers=num_workers > 0,
+        prefetch_factor=2 if num_workers > 0 else None,
     )
     val_loader = DataLoader(
         val_ds,
         batch_size=cfg["batch_size"],
         shuffle=False,
-        num_workers=cfg.get("num_workers", 2),
+        num_workers=num_workers,
+        pin_memory=device.type == "cuda",
+        persistent_workers=num_workers > 0,
+        prefetch_factor=2 if num_workers > 0 else None,
     )
 
     model = ForgeGate(
@@ -108,10 +113,10 @@ def main() -> None:
         clip_pretrained=cfg.get("clip_pretrained", "openai"),
         freeze_clip=cfg.get("freeze_clip", True),
     ).to(device)
-    # Critical: train() must keep CLIP in eval — assert once at startup.
+
     model.train()
     assert not model.clip.training, "CLIP must stay in eval while ForgeGate trains"
-    model.train()  # restore train mode for forensic/gate/head
+    model.train()
 
     counts = model.parameter_counts()
     print(f"params total={counts['total']:,} trainable={counts['trainable']:,}")
@@ -125,7 +130,7 @@ def main() -> None:
     alpha = float(cfg.get("consistency_weight", 0.5))
     beta = float(cfg.get("gate_reg_weight", 0.3))
     use_amp = device.type == "cuda" and cfg.get("amp", True)
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
 
     ckpt_dir = Path(cfg.get("checkpoint_dir", "checkpoints"))
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -146,12 +151,13 @@ def main() -> None:
         n = 0
         pbar = tqdm(train_loader, desc=f"epoch {epoch}/{cfg['epochs']}")
         for x_clean, x_t, y, severity, _path in pbar:
-            x_clean = x_clean.to(device)
-            x_t = x_t.to(device)
-            y = y.to(device)
-            severity = severity.to(device).float()
+            x_clean = x_clean.to(device, non_blocking=True)
+            x_t = x_t.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True)
+            severity = severity.to(device, non_blocking=True).float()
+
             opt.zero_grad(set_to_none=True)
-            with torch.cuda.amp.autocast(enabled=use_amp):
+            with torch.amp.autocast('cuda', enabled=use_amp):
                 out_c = model(x_clean)
                 out_t = model(x_t)
                 cls_loss = loss_fn(out_c.logit, y) + loss_fn(out_t.logit, y)
@@ -159,8 +165,6 @@ def main() -> None:
                     torch.sigmoid(out_c.logit), torch.sigmoid(out_t.logit)
                 )
 
-            # Gate BCE must run in plain fp32 — binary_cross_entropy on raw
-            # probabilities is unsafe under autocast (only *_with_logits is safe there).
             gate_clean = out_c.gate.float()
             gate_t_out = out_t.gate.float()
             target_c = torch.ones_like(gate_clean)
@@ -172,6 +176,7 @@ def main() -> None:
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
+
             bs = x_clean.size(0)
             running["total"] += float(loss.item()) * bs
             running["cls"] += float(cls_loss.item()) * bs
@@ -238,7 +243,6 @@ def main() -> None:
             best_final_score = final_score
             torch.save(payload, ckpt_dir / "best.pt")
 
-    # Temperature scaling on protocol-augmented val (matches deployment mix).
     if cfg.get("calibrate", True):
         print("Fitting temperature on protocol-augmented val…")
         best_path = ckpt_dir / "best.pt"
