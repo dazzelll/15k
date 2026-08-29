@@ -20,6 +20,7 @@ Design (per team discussion):
 from __future__ import annotations
 
 import io
+import math
 import random
 from dataclasses import dataclass
 from typing import Callable
@@ -128,36 +129,50 @@ def re_screenshot(img: Image.Image, scale: float, quality: float) -> Image.Image
 
 
 # ---------------------------------------------------------------------------
-# Measured severity: derive severity from actual signal loss instead of a
-# hand-picked constant, using the same high-frequency-energy idea the gate's
-# degradation_stats() relies on.
+# Measured severity: derive the gate target from actual spectral change
+# (HF loss from JPEG/blur *or* HF gain from noise), not a hand-picked constant.
 # ---------------------------------------------------------------------------
 
 def _hf_lf_ratio(img: Image.Image) -> float:
     """Ratio of high-frequency to low-frequency energy in the luma channel.
-    Degradation (blur/JPEG/downsampling) disproportionately removes high
-    frequencies, so this ratio drops as forensic-relevant detail is lost."""
+
+    HF is the mean of the spectrum *outside* the LF box (not just the far
+    corner), so the slice is never empty on tiny images. JPEG/blur drop this
+    ratio; additive noise raises it.
+    """
     arr = np.asarray(img.convert("L"), dtype=np.float32) / 255.0
     t = torch.from_numpy(arr).unsqueeze(0).unsqueeze(0)
     mag = torch.fft.rfft2(t).abs()
     h, w = mag.shape[-2:]
     cy, cx = max(1, h // 6), max(1, w // 6)
-    lf = mag[:, :, :cy, :cx].mean().item() + 1e-8
-    hf = mag[:, :, cy:, cx:].mean().item()
+    lf_block = mag[:, :, :cy, :cx]
+    n_all = mag.numel()
+    n_lf = lf_block.numel()
+    n_hf = n_all - n_lf
+    lf = lf_block.mean().item() + 1e-8
+    if n_hf <= 0:
+        return 0.0
+    hf = (mag.sum().item() - lf_block.sum().item()) / n_hf
     return hf / lf
 
 
-def measure_severity(original: Image.Image, transformed: Image.Image) -> float:
-    """Fraction of relative high-frequency signal lost due to the transform(s)
-    actually applied, clamped to [0, 1]. This is what feeds the gate's
-    training target, so it reflects real measured damage rather than an
-    author's guess about how harsh a given op "should" be."""
-    before = _hf_lf_ratio(original)
-    after = _hf_lf_ratio(transformed)
-    if before <= 1e-8:
+def _severity_from_hf_ratios(before: float, after: float) -> float:
+    """Symmetric spectral change in [0, 1]: HF loss *or* HF gain is damage."""
+    if not math.isfinite(before) or not math.isfinite(after):
         return 0.0
-    retained = max(0.0, min(after / before, 1.0))
-    return float(1.0 - retained)
+    if before <= 1e-8 and after <= 1e-8:
+        return 0.0
+    retained = min(before, after) / max(before, after, 1e-8)
+    return float(1.0 - min(max(retained, 0.0), 1.0))
+
+
+def measure_severity(original: Image.Image, transformed: Image.Image) -> float:
+    """How much the spectrum moved, as a gate training target in [0, 1].
+
+    JPEG/blur/resize lower HF; noise raises it. Both should increase severity
+    so the gate learns to distrust forensics on degraded inputs.
+    """
+    return _severity_from_hf_ratios(_hf_lf_ratio(original), _hf_lf_ratio(transformed))
 
 
 # ---------------------------------------------------------------------------
@@ -295,9 +310,18 @@ class ProtocolTrainTransform:
     Returns (image, description, severity).
     """
 
-    def __init__(self, p: float = 0.85, random_stack_prob: float = 0.15):
+    def __init__(
+        self,
+        p: float = 0.85,
+        random_stack_prob: float = 0.15,
+        measure_size: int | None = None,
+    ):
         self.p = p
         self.random_stack_prob = random_stack_prob
+        # If set, measure severity after resizing to this size (same as the
+        # tensor the model sees). Native-resolution JPEG then a 224 downsample
+        # would otherwise be missing from the gate target.
+        self.measure_size = measure_size
 
     def __call__(
         self, img: Image.Image, rng: random.Random | None = None
@@ -315,7 +339,12 @@ class ProtocolTrainTransform:
             transformed = _run_pipeline(original, pipeline, rng=rng)
             description = pipeline.name
 
-        severity = measure_severity(original, transformed)
+        orig_m, trans_m = original, transformed
+        if self.measure_size is not None:
+            size = (self.measure_size, self.measure_size)
+            orig_m = original.resize(size, Image.Resampling.BILINEAR)
+            trans_m = transformed.resize(size, Image.Resampling.BILINEAR)
+        severity = measure_severity(orig_m, trans_m)
         return transformed, description, severity
 
 
