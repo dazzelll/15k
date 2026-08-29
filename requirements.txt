@@ -11,3 +11,4 @@ gradio>=4.0.0
 pyyaml>=6.0
 matplotlib>=3.8.0
 kagglehub>=0.3.0
+datasets>=2.14.0
