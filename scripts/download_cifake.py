@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Download CIFAKE with KaggleHub and point data/train + data/val at it.
 
-Needs a Kaggle API token at ~/.kaggle/kaggle.json
-(Kaggle → Account → Create New Token).
+Auth (first match wins):
+  1. .env in the repo root with KAGGLE_USERNAME and KAGGLE_KEY
+  2. already-exported env vars
+  3. ~/.kaggle/kaggle.json
 
   python scripts/download_cifake.py
   python train.py --train_dir data/train --val_dir data/val --config configs/default.yaml
@@ -11,9 +13,25 @@ Needs a Kaggle API token at ~/.kaggle/kaggle.json
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 CIFAKE_HANDLE = "birdy654/cifake-real-and-ai-generated-synthetic-images"
+
+
+def load_dotenv(path: Path) -> None:
+    """Load KEY=VALUE lines into os.environ without overwriting existing vars."""
+    if not path.is_file():
+        return
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip("'").strip('"')
+        if key and key not in os.environ:
+            os.environ[key] = value
 
 
 def _has_real_fake(folder: Path) -> bool:
@@ -56,6 +74,13 @@ def main() -> None:
     )
     parser.add_argument("--force", action="store_true", help="Replace existing data/train and data/val links.")
     args = parser.parse_args()
+
+    load_dotenv(args.repo_root / ".env")
+    if not (os.environ.get("KAGGLE_USERNAME") and os.environ.get("KAGGLE_KEY")):
+        print(
+            "No KAGGLE_USERNAME / KAGGLE_KEY in .env or the environment. "
+            "KaggleHub will try ~/.kaggle/kaggle.json next."
+        )
 
     import kagglehub
 
