@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Download CIFAKE with KaggleHub and SID_Set from Hugging Face, point data/train + data/val at them.
+"""Download CIFAKE with KaggleHub, SID_Set from Hugging Face, and WildFake from ModelScope.
+Point data/train + data/val at them.
 
 Auth (first match wins):
   1. .env in the repo root with KAGGLE_USERNAME and KAGGLE_KEY
@@ -8,6 +9,8 @@ Auth (first match wins):
 
   python scripts/download_datasets.py
   python train.py --train_dir data/train --val_dir data/val --config configs/default.yaml
+  
+Note: WildFake excludes validation subset (COCO val2017 + DALL·E Advanced) from training data.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from pathlib import Path
 
 CIFAKE_HANDLE = "birdy654/cifake-real-and-ai-generated-synthetic-images"
 SID_SET_HANDLE = "saberzl/SID_Set"
+WILDFAKE_HANDLE = "hy2628982280/WildFake"
 
 
 def load_dotenv(path: Path) -> None:
@@ -145,15 +149,143 @@ def download_sid_set(repo_root: Path, sample_size: int = 5000) -> Path:
     return output_dir
 
 
-def merge_datasets(cifake_dir: Path, sid_dir: Path, output_dir: Path) -> None:
-    """Merge CIFAKE and SID_Set datasets into a single directory structure.
+def download_wildfake(repo_root: Path, sample_size: int = 5000) -> Path:
+    """Download WildFake from ModelScope and convert to REAL/FAKE structure.
+    
+    Excludes validation subset (COCO val2017 + DALL·E Advanced) from training data.
+    
+    Args:
+        repo_root: Root directory of the repository
+        sample_size: Number of images to sample per class (for hackathon-scale training)
+    
+    Returns:
+        Path to the processed WildFake data
+    """
+    try:
+        from modelscope.msdatasets import MsDataset
+    except ImportError:
+        print("ModelScope SDK not installed. Install with: pip install modelscope[datasets]")
+        raise
+    
+    print(f"Downloading WildFake from ModelScope...")
+    
+    # Load dataset with streaming to avoid memory issues
+    # WildFake structure: we need to find the correct subset/split
+    try:
+        dataset = MsDataset.load(
+            WILDFAKE_HANDLE,
+            subset_name='default',
+            split='train'
+        )
+    except Exception as e:
+        print(f"Error loading WildFake with default subset: {e}")
+        # Try loading without subset specification
+        dataset = MsDataset.load(WILDFAKE_HANDLE)
+    
+    # Create output directory structure
+    output_dir = repo_root / "data" / "wildfake"
+    real_dir = output_dir / "REAL"
+    fake_dir = output_dir / "FAKE"
+    
+    # Clean up existing directories
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    
+    real_dir.mkdir(parents=True, exist_ok=True)
+    fake_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Process and sample images
+    real_count = 0
+    fake_count = 0
+    
+    # Validation subset to exclude
+    validation_exclusions = {
+        'coco_val2017',
+        'coco-val', 
+        'val2017',
+        'dalle_advanced',
+        'dall-e-advanced',
+        'dalle-advanced'
+    }
+    
+    print(f"Sampling {sample_size} images per class from WildFake (excluding validation subset)...")
+    
+    for item in dataset:
+        if real_count >= sample_size and fake_count >= sample_size:
+            break
+            
+        try:
+            # WildFake dataset structure may vary, so we need to handle different formats
+            # Common keys: 'image', 'label', 'img_id', 'filename', etc.
+            image = item.get('image') or item.get('img')
+            label = item.get('label')
+            img_id = item.get('img_id') or item.get('filename') or item.get('id')
+            
+            # Skip if image is None
+            if image is None:
+                continue
+                
+            # Check if this is from validation subset (exclude from training)
+            if img_id and any(excl in str(img_id).lower() for excl in validation_exclusions):
+                continue
+                
+            # Convert label to REAL/FAKE
+            # Assuming WildFake uses 0 for real, 1 for fake (common convention)
+            # If the dataset uses different labels, this may need adjustment
+            if label == 0:
+                if real_count >= sample_size:
+                    continue
+                target_dir = real_dir
+                real_count += 1
+            else:
+                if fake_count >= sample_size:
+                    continue
+                target_dir = fake_dir
+                fake_count += 1
+            
+            # Convert PIL Image if needed
+            if hasattr(image, 'save'):
+                pil_image = image
+            else:
+                from PIL import Image
+                import io
+                if isinstance(image, bytes):
+                    pil_image = Image.open(io.BytesIO(image))
+                else:
+                    pil_image = Image.open(image)
+            
+            # Convert to RGB if needed
+            if pil_image.mode != "RGB":
+                pil_image = pil_image.convert("RGB")
+            
+            # Save with unique filename
+            safe_id = str(img_id).replace("/", "_").replace("\\", "_") if img_id else f"wildfake_{real_count + fake_count}"
+            image_path = target_dir / f"wf_{safe_id}.jpg"
+            pil_image.save(image_path, "JPEG", quality=95)
+            
+            if (real_count + fake_count) % 500 == 0:
+                print(f"Processed {real_count} REAL and {fake_count} FAKE images...")
+                
+        except Exception as e:
+            print(f"Error processing WildFake item: {e}")
+            continue
+    
+    print(f"Downloaded WildFake: {real_count} REAL images, {fake_count} FAKE images")
+    print(f"WildFake data saved to: {output_dir}")
+    
+    return output_dir
+
+
+def merge_datasets(cifake_dir: Path, sid_dir: Path, wildfake_dir: Path = None, output_dir: Path = None) -> None:
+    """Merge CIFAKE, SID_Set, and optionally WildFake datasets into a single directory structure.
     
     Args:
         cifake_dir: Path to CIFAKE data (with REAL/FAKE subdirs)
         sid_dir: Path to SID_Set data (with REAL/FAKE subdirs)
+        wildfake_dir: Optional path to WildFake data (with REAL/FAKE subdirs)
         output_dir: Path to output merged directory
     """
-    print(f"Merging CIFAKE and SID_Set datasets...")
+    print(f"Merging datasets...")
     
     # Create output directories
     output_real = output_dir / "REAL"
@@ -193,6 +325,21 @@ def merge_datasets(cifake_dir: Path, sid_dir: Path, output_dir: Path) -> None:
             shutil.copy(img, output_fake / img.name)
         print(f"Copied {len(list(output_fake.glob('sid_*.jpg')))} SID_Set FAKE images")
     
+    # Copy WildFake images if provided
+    if wildfake_dir:
+        wildfake_real = wildfake_dir / "REAL"
+        wildfake_fake = wildfake_dir / "FAKE"
+        
+        if wildfake_real.exists():
+            for img in wildfake_real.glob("*.jpg"):
+                shutil.copy(img, output_real / img.name)
+            print(f"Copied {len(list(output_real.glob('wf_*.jpg')))} WildFake REAL images")
+        
+        if wildfake_fake.exists():
+            for img in wildfake_fake.glob("*.jpg"):
+                shutil.copy(img, output_fake / img.name)
+            print(f"Copied {len(list(output_fake.glob('wf_*.jpg')))} WildFake FAKE images")
+    
     total_real = len(list(output_real.glob("*.jpg")))
     total_fake = len(list(output_fake.glob("*.jpg")))
     
@@ -217,7 +364,7 @@ def main() -> None:
         "--sample-size",
         type=int,
         default=5000,
-        help="Number of images to sample per class from SID_Set (default: 5000 for hackathon-scale training)",
+        help="Number of images to sample per class from SID_Set and WildFake (default: 5000 for hackathon-scale training)",
     )
     parser.add_argument(
         "--no-sid",
@@ -225,9 +372,14 @@ def main() -> None:
         help="Skip downloading SID_Set dataset (only use CIFAKE).",
     )
     parser.add_argument(
+        "--wildfake",
+        action="store_true",
+        help="Download WildFake dataset (excludes validation subset from training).",
+    )
+    parser.add_argument(
         "--merge",
         action="store_true",
-        help="Merge CIFAKE and SID_Set into single data/train directory.",
+        help="Merge all downloaded datasets into single data/train directory.",
     )
     args = parser.parse_args()
 
@@ -257,14 +409,23 @@ def main() -> None:
             print(f"Failed to download SID_Set: {e}")
             print("Continuing with CIFAKE only...")
 
+    # Download WildFake if requested
+    wildfake_train_dir = None
+    if args.wildfake:
+        try:
+            wildfake_train_dir = download_wildfake(args.repo_root, args.sample_size)
+        except Exception as e:
+            print(f"Failed to download WildFake: {e}")
+            print("Continuing with other datasets...")
+
     if args.no_link:
         return
 
-    if args.merge and sid_train_dir:
+    if args.merge and (sid_train_dir or wildfake_train_dir):
         # Merge datasets if requested
-        merge_datasets(train_dir, sid_train_dir, args.repo_root / "data" / "train")
+        merge_datasets(train_dir, sid_train_dir, wildfake_train_dir, args.repo_root / "data" / "train")
         link_split(val_dir, args.repo_root / "data" / "val", args.force)
-        print("Merged CIFAKE + SID_Set data available in data/train and data/val")
+        print("Merged data available in data/train and data/val")
     else:
         # Link datasets separately
         link_split(train_dir, args.repo_root / "data" / "cifake_train", args.force)
@@ -273,7 +434,13 @@ def main() -> None:
         if sid_train_dir:
             link_split(sid_train_dir, args.repo_root / "data" / "sid_train", args.force)
             print("Note: CIFAKE data in data/cifake_train, SID_Set data in data/sid_train")
-            print("Use --merge flag to combine them into data/train")
+        
+        if wildfake_train_dir:
+            link_split(wildfake_train_dir, args.repo_root / "data" / "wildfake_train", args.force)
+            print("Note: WildFake data in data/wildfake_train")
+        
+        if sid_train_dir or wildfake_train_dir:
+            print("Use --merge flag to combine all datasets into data/train")
 
 
 if __name__ == "__main__":

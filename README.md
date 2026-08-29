@@ -38,24 +38,28 @@ Licensed public sources (train on these, not the demo split):
 
 - [CIFAKE](https://www.kaggle.com/datasets/birdy654/cifake-real-and-ai-generated-synthetic-images) — small, 32×32; good for a pipeline dry-run (images are upsampled to 224). Copy `env.example` to `.env` and set `KAGGLE_USERNAME` / `KAGGLE_KEY` from Kaggle → Account → Create New Token (`kaggle.json`).
 - [SID_Set](https://huggingface.co/datasets/saberzl/SID_Set) — diverse synthetic and tampered images; includes real images from OpenImages V7.
+- [WildFake](https://modelscope.cn/datasets/hy2628982280/WildFake/summary) — large-scale hierarchical dataset with state-of-the-art generators. **Excludes validation subset (COCO val2017 + DALL·E Advanced) from training data** as per hackathon rules.
 
 Download and prepare data:
 
 ```bash
-# Download both CIFAKE and SID_Set (default: 5000 images per class from SID_Set for hackathon-scale training)
+# Download CIFAKE and SID_Set (default: 5000 images per class for hackathon-scale training)
 python scripts/download_datasets.py
 
+# Download all three datasets (CIFAKE + SID_Set + WildFake)
+python scripts/download_datasets.py --wildfake
+
 # Download and merge into single data/train directory
-python scripts/download_datasets.py --merge
+python scripts/download_datasets.py --wildfake --merge
 
 # Custom sample size for faster training
-python scripts/download_datasets.py --sample-size 2000 --merge
+python scripts/download_datasets.py --sample-size 2000 --wildfake --merge
 
 # Only use CIFAKE (original behavior)
 python scripts/download_datasets.py --no-sid
 ```
 
-The script downloads CIFAKE via KaggleHub and SID_Set via Hugging Face, then symlinks them to `data/` directories. `.env` and images stay out of git. `~/.kaggle/kaggle.json` still works if `.env` is missing.
+The script downloads CIFAKE via KaggleHub, SID_Set via Hugging Face, and WildFake via ModelScope, then symlinks them to `data/` directories. `.env` and images stay out of git. `~/.kaggle/kaggle.json` still works if `.env` is missing.
 - [WildFake](https://modelscope.cn/datasets/hy2628982280/WildFake/summary) — excluding the listed COCO val2017 / DALL·E Advanced demo subset.
 
 ## Train
