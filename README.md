@@ -36,7 +36,13 @@ data/val/fake/*.jpg
 
 Licensed public sources (train on these, not the demo split):
 
-- [CIFAKE](https://www.kaggle.com/datasets/birdy654/cifake-real-and-ai-generated-synthetic-images) — small, 32×32; good for a pipeline dry-run (images are upsampled to 224).
+- [CIFAKE](https://www.kaggle.com/datasets/birdy654/cifake-real-and-ai-generated-synthetic-images) — small, 32×32; good for a pipeline dry-run (images are upsampled to 224). Put `kaggle.json` in `~/.kaggle/`, then:
+
+```bash
+python scripts/download_cifake.py
+```
+
+That downloads via KaggleHub and symlinks CIFAKE `train/` → `data/train`, `test/` → `data/val` (`REAL`/`FAKE` folders are already recognised). Images stay out of git.
 - [SID_Set](https://huggingface.co/datasets/saberzl/SID_Set)
 - [WildFake](https://modelscope.cn/datasets/hy2628982280/WildFake/summary) — excluding the listed COCO val2017 / DALL·E Advanced demo subset.
 
