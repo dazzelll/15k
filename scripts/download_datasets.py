@@ -372,6 +372,74 @@ def _write_wildfake_split(rows: list[tuple[Path, bool, str]], dest: Path) -> tup
     return n_real, n_fake
 
 
+def download_wildfake_demo(repo_root: Path, force: bool) -> Path:
+    """Download WildFake demo subset (COCO val2017 + DALL-E Advanced) for demo video only.
+    
+    This dataset is for demonstration purposes only and should NOT be used for training.
+    It contains:
+    - Non-AIGC: COCO val2017 (4998 images)
+    - AIGC: DALL-E Advanced (8843 images)
+    """
+    from modelscope.msdatasets import MsDataset
+
+    demo_out = repo_root / "data" / "wildfake_demo"
+    if not force and source_ready(demo_out):
+        print(f"WildFake demo already present at {demo_out}; skip (--force to redo)")
+        return demo_out
+
+    try:
+        dataset = MsDataset.load(WILDFAKE_HANDLE, subset_name='default', split='train')
+    except Exception as e:
+        print(f"WildFake demo failed ({e}); loading without subset/split")
+        dataset = MsDataset.load(WILDFAKE_HANDLE)
+
+    if demo_out.exists():
+        shutil.rmtree(demo_out)
+    real_dir, fake_dir = demo_out / "REAL", demo_out / "FAKE"
+    real_dir.mkdir(parents=True)
+    fake_dir.mkdir(parents=True)
+
+    n_real = n_fake = 0
+    root: list[Path | None] = [None]
+
+    for raw in dataset:
+        item = _as_dict(raw)
+        # Only include demo rows (COCO val2017 + DALL-E Advanced)
+        if not is_wildfake_demo_row(item):
+            continue
+        
+        mapped = parse_binary_label(_field(item, "IsFake", "is_fake", "label"))
+        if mapped is None:
+            continue
+            
+        image_path = _field(item, "Image_path", "image_path", "path")
+        src = None
+        if image_path:
+            src = _resolve_wildfake_file(str(image_path), root)
+        if src is None:
+            image = _field(item, "image", "img", "Image")
+            if image is not None and not isinstance(image, (str, Path)):
+                continue
+        if src is None or not src.is_file():
+            continue
+
+        arch = _field(item, "Architecture", "Category", "Generator") or "demo"
+        num = _field(item, "Num", "num")
+        stem = _safe_id(f"{arch}_{num}_{src.stem}", src.stem)
+        
+        target_dir = fake_dir if mapped == 1 else real_dir
+        shutil.copy2(src, target_dir / f"demo_{stem}{src.suffix.lower() or '.jpg'}")
+        
+        if mapped == 1:
+            n_fake += 1
+        else:
+            n_real += 1
+
+    print(f"WildFake demo: {n_real} REAL (COCO val2017), {n_fake} FAKE (DALL-E Advanced)")
+    print(f"WARNING: This dataset is for demo video only. DO NOT use for training.")
+    return demo_out
+
+
 def download_wildfake(repo_root: Path, force: bool) -> tuple[Path, Path | None]:
     from modelscope.msdatasets import MsDataset
 
@@ -382,9 +450,9 @@ def download_wildfake(repo_root: Path, force: bool) -> tuple[Path, Path | None]:
         return train_out, val_out
 
     try:
-        dataset = MsDataset.load(WILDFAKE_HANDLE, subset_name="default")
+        dataset = MsDataset.load(WILDFAKE_HANDLE, subset_name='default', split='train')
     except Exception as e:
-        print(f"WildFake default subset failed ({e}); loading without subset")
+        print(f"WildFake default subset failed ({e}); loading without subset/split")
         dataset = MsDataset.load(WILDFAKE_HANDLE)
 
     need_real = WILDFAKE_TRAIN_SAMPLE + WILDFAKE_VAL_SAMPLE
@@ -534,6 +602,11 @@ def main() -> None:
         help="Skip WildFake (requires modelscope).",
     )
     parser.add_argument(
+        "--download-demo",
+        action="store_true",
+        help="Download WildFake demo subset (COCO val2017 + DALL-E Advanced) for demo video only. DO NOT use for training.",
+    )
+    parser.add_argument(
         "--no-aigc-benchmark",
         action="store_true",
         help="Skip the held-out AIGC-Detection-Benchmark test folder.",
@@ -575,6 +648,13 @@ def main() -> None:
     merge_into(train_sources, args.repo_root / "data" / "train")
     merge_into(val_sources, args.repo_root / "data" / "val")
 
+    demo_dir = None
+    if args.download_demo:
+        try:
+            demo_dir = download_wildfake_demo(args.repo_root, args.force)
+        except Exception as e:
+            print(f"WildFake demo download failed ({e}); continuing without demo dataset.")
+
     aigc_dir = None
     if not args.no_aigc_benchmark:
         try:
@@ -586,6 +666,9 @@ def main() -> None:
     val_dest = args.repo_root / "data" / "val"
     print(f"\nTrain/val: python train.py --train_dir {train_dest} --val_dir {val_dest} --config configs/default.yaml")
     print(f"In-distribution eval: python evaluate.py --data_dir {val_dest} --checkpoint checkpoints/best.pt")
+    if demo_dir is not None:
+        print(f"Demo dataset (for video only): {demo_dir}")
+        print(f"  Demo eval: python evaluate.py --data_dir {demo_dir} --checkpoint checkpoints/best.pt")
     if aigc_dir is not None:
         print(
             f"Unseen-generator test: python evaluate.py --data_dir {aigc_dir} --checkpoint checkpoints/best.pt"
