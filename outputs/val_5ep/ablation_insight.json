@@ -1,0 +1,26 @@
+[
+  {
+    "gate_mode": "zero",
+    "meaning": "semantic-only (g=0)",
+    "clean_acc": 0.83,
+    "harsh_acc": 0.6609375,
+    "mean_gate_clean": 0.9857870435714722,
+    "mean_gate_harsh": 0.921763042025268
+  },
+  {
+    "gate_mode": "one",
+    "meaning": "forensic-always (g=1)",
+    "clean_acc": 0.925,
+    "harsh_acc": 0.7259375,
+    "mean_gate_clean": 0.9857870435714722,
+    "mean_gate_harsh": 0.9217637225426732
+  },
+  {
+    "gate_mode": "learned",
+    "meaning": "full ForgeGate",
+    "clean_acc": 0.9275,
+    "harsh_acc": 0.7378125,
+    "mean_gate_clean": 0.9857870435714722,
+    "mean_gate_harsh": 0.921765663139522
+  }
+]
