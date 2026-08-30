@@ -22,6 +22,27 @@ from src.model import ForgeGate, GateMode
 from src.transforms import PROTOCOL
 
 
+def _stratified_subset(samples: list, max_images: int) -> list:
+    """Take an even split across labels, not just the first N.
+
+    ds.samples is built from a sorted file listing, so folder names like
+    FAKE/REAL sort alphabetically and a naive samples[:max_images] slice can
+    end up single-class (e.g. all FAKE). roc_auc_score / average_precision_score
+    both return NaN when only one class is present, which silently breaks
+    every AUC/AP/Final Score in this script. Stratifying guarantees both
+    classes are represented regardless of file ordering.
+    """
+    by_label: dict = {}
+    for path, label in samples:
+        by_label.setdefault(label, []).append((path, label))
+    n_labels = max(1, len(by_label))
+    per_label = max(1, max_images // n_labels)
+    subset = []
+    for label, items in by_label.items():
+        subset.extend(items[:per_label])
+    return subset
+
+
 def metrics(y: np.ndarray, p: np.ndarray) -> dict[str, float]:
     pred = (p >= 0.5).astype(np.float32)
     out = {"acc": float(accuracy_score(y, pred))}
@@ -137,7 +158,7 @@ def main() -> None:
     model.to(device).eval()
 
     ds = AIGCFolderDataset(args.data_dir, image_size=args.image_size, train=False)
-    pairs = [(p, lab, 0.0) for p, lab in ds.samples[: args.max_images]]
+    pairs = [(p, lab, 0.0) for p, lab in _stratified_subset(ds.samples, args.max_images)]
 
     gate_modes: list[GateMode] = ["learned"]
     if args.ablation and not zeroshot:
@@ -182,27 +203,31 @@ def main() -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out, index=False)
     (out.with_suffix(".json")).write_text(df.to_json(orient="records", indent=2))
-    
+
     # Calculate and display Final Score
     clean_auc = df[df["family"] == "clean"]["auc"].mean()
     robust_auc = df[df["family"] != "clean"]["auc"].mean()
     final_score = 0.0
     if not np.isnan(clean_auc) and not np.isnan(robust_auc):
         final_score = 0.50 * clean_auc + 0.50 * robust_auc
-    
+
     print(f"\nFinal Score: {final_score:.4f} (0.50 * AUC_clean {clean_auc:.4f} + 0.50 * AUC_robust {robust_auc:.4f})")
-    
+
     # Generate simplified table with key conditions using actual transform names from PROTOCOL
     # These are the exact names that appear in the PROTOCOL dictionary
     key_conditions = {
         "clean": "Clean",
-        "jpeg_q30": "JPEG q30", 
+        "jpeg_q30": "JPEG q30",
         "blur_s2.0": "Blur σ=2",
         "center_crop": "Crop 80%",
         "resize_x0.5": "Resize 50%",
-        "resize_x0.25": "Unseen gen."
+        "resize_x0.25": "Unseen gen.",  # TODO: replace with a real held-out
+                                          # unseen-generator dataset row once
+                                          # that data is wired in — this is a
+                                          # resize condition, not a generator
+                                          # generalization test.
     }
-    
+
     print("\nKey Conditions Table:")
     key_results = []
     for transform_name, display_name in key_conditions.items():
@@ -214,14 +239,14 @@ def main() -> None:
                 "Acc.": f"{row['acc']:.4f}",
                 "AUC": f"{row['auc']:.4f}" if not np.isnan(row['auc']) else "N/A"
             })
-    
+
     if key_results:
         key_df = pd.DataFrame(key_results)
         print(key_df.to_string(index=False))
         key_csv = out.parent / "key_conditions.csv"
         key_df.to_csv(key_csv, index=False)
         print(f"\nKey conditions table saved to: {key_csv}")
-    
+
     print(df.to_string(index=False))
     print(f"wrote {out}")
 
