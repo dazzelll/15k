@@ -2,7 +2,7 @@ seed: 42
 image_size: 224
 batch_size: 32
 num_workers: 4
-epochs: 8
+epochs: 5
 lr: 1.0e-4
 weight_decay: 0.05
 clip_model: ViT-B-16
