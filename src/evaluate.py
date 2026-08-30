@@ -143,6 +143,11 @@ def main() -> None:
         action="store_true",
         help="Run semantic-only / forensic-always / full ForgeGate",
     )
+    parser.add_argument(
+        "--aigc_benchmark_dir",
+        default=None,
+        help="Path to AIGC benchmark dataset for unseen generator evaluation",
+    )
     args = parser.parse_args()
 
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -213,6 +218,26 @@ def main() -> None:
 
     print(f"\nFinal Score: {final_score:.4f} (0.50 * AUC_clean {clean_auc:.4f} + 0.50 * AUC_robust {robust_auc:.4f})")
 
+    # Evaluate on AIGC benchmark for unseen generator performance if provided
+    unseen_gen_metrics = None
+    if args.aigc_benchmark_dir:
+        print(f"\nEvaluating on unseen generators from {args.aigc_benchmark_dir}...")
+        aigc_ds = AIGCFolderDataset(args.aigc_benchmark_dir, image_size=args.image_size, train=False)
+        aigc_pairs = [(p, lab, 0.0) for p, lab in _stratified_subset(aigc_ds.samples, args.max_images)]
+        
+        # Evaluate clean condition on AIGC benchmark
+        aigc_m, _, _, _, _ = score_loader(
+            model,
+            aigc_pairs,
+            lambda x: x,  # No transform for clean evaluation
+            device,
+            args.image_size,
+            zeroshot,
+            gate_mode="learned",
+        )
+        unseen_gen_metrics = aigc_m
+        print(f"Unseen generator (clean): acc={aigc_m['acc']:.4f}, auc={aigc_m['auc']:.4f}")
+
     # Generate simplified table with key conditions using actual transform names from PROTOCOL
     # These are the exact names that appear in the PROTOCOL dictionary
     key_conditions = {
@@ -221,11 +246,6 @@ def main() -> None:
         "blur_s2.0": "Blur σ=2",
         "center_crop": "Crop 80%",
         "resize_x0.5": "Resize 50%",
-        "resize_x0.25": "Unseen gen.",  # TODO: replace with a real held-out
-                                          # unseen-generator dataset row once
-                                          # that data is wired in — this is a
-                                          # resize condition, not a generator
-                                          # generalization test.
     }
 
     print("\nKey Conditions Table:")
@@ -239,6 +259,14 @@ def main() -> None:
                 "Acc.": f"{row['acc']:.4f}",
                 "AUC": f"{row['auc']:.4f}" if not np.isnan(row['auc']) else "N/A"
             })
+    
+    # Add unseen generator row if AIGC benchmark was evaluated
+    if unseen_gen_metrics is not None:
+        key_results.append({
+            "Condition": "Unseen gen.",
+            "Acc.": f"{unseen_gen_metrics['acc']:.4f}",
+            "AUC": f"{unseen_gen_metrics['auc']:.4f}" if not np.isnan(unseen_gen_metrics['auc']) else "N/A"
+        })
 
     if key_results:
         key_df = pd.DataFrame(key_results)
