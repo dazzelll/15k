@@ -208,8 +208,8 @@ Given more time and resources, the following improvements would be pursued:
 ## Team Contributions
 
 **Team Members:**
-- Dazzel — <github.com/dazzelll>
-- Zhi Ling — <github.com/zhilingggg>
+- Dazzel — <http://github.com/dazzelll>
+- Zhi Ling — <http://github.com/zhilingggg>
 
 **Key Contributions:**
 - Architecture design and implementation of ForgeGate model
