@@ -1,19 +1,29 @@
 # ForgeGate
 
-Hackathon prototype for **robust detection of AI-generated images** after real-world post-processing (JPEG, blur, resize, noise, color jitter, crop).
+## Project Overview
 
-The three-branch “RGB ViT + SRM ResNet + Canny ConvNeXt” stack is the right *forensics intuition* and the wrong *system* for this challenge. JPEG, blur, and thumbnail resize destroy the traces those extra backbones are built to see. ForgeGate keeps multi-cue detection, but:
+ForgeGate is a robust AI-generated image detection system designed to maintain high accuracy even when images undergo real-world post-processing transformations (JPEG compression, blur, resizing, noise, color adjustments, cropping). The system addresses the critical challenge that many forensic traces are destroyed by common image manipulations.
 
-1. **Semantic stream** — frozen CLIP ViT-B/16 (~86M, not trained). Distributional / photographic cues survive redistribution (UnivFD-style).
-2. **Forensic stream** — ResNet-18 on high-pass + neighboring-pixel + **mid-band** spectrum maps, not raw SRM/PRNU.
-3. **Degradation-aware gate** — cheap stats (blur, 8×8 blockiness, HF energy, noise) scale the forensic embedding; the gate is also supervised toward `1 − severity` from the known protocol transform.
-4. **Protocol-matched training** — paired clean/transformed forwards with consistency loss + official transform table sampling.
+### Architecture
 
-Total parameters ≈ 97M (CLIP frozen). Trainable ≈ 12M. Under the **&lt;2B** cap.
+ForgeGate uses a multi-cue detection architecture with three key components:
 
-Do **not** train on the organiser’s WildFake demonstration split (COCO val2017 + DALL·E Advanced). Use it only for demos.
+1. **Semantic Stream** — Frozen CLIP ViT-B/16 (~86M parameters) that leverages distributional and photographic cues which survive image redistribution (inspired by UnivFD).
+2. **Forensic Stream** — ResNet-18 operating on high-pass, neighboring-pixel, and mid-band spectrum maps to detect manipulation artifacts.
+3. **Degradation-Aware Gate** — A lightweight module that computes image statistics (blur, blockiness, high-frequency energy, noise) and dynamically scales the forensic embedding based on estimated degradation severity.
 
-## Setup
+The system is trained with protocol-matched augmentation using paired clean/transformed images with consistency loss, ensuring the model learns to maintain robustness across various image transformations.
+
+**Technical Specifications:**
+- Total parameters: ~97M (CLIP frozen at ~86M)
+- Trainable parameters: ~12M
+- Model size: Well under the 2B parameter cap
+
+**Key Innovation:** The degradation-aware gate mechanism allows the model to adaptively rely more on semantic features when forensic traces are likely degraded by transformations, and more on forensic features when images are clean.
+
+**Important:** Do not train on the organiser's WildFake demonstration split (COCO val2017 + DALL·E Advanced). Use it only for demos.
+
+## Setup and Installation
 
 ```bash
 python3 -m venv .venv
@@ -59,13 +69,56 @@ python scripts/download_datasets.py --force
 
 The script downloads CIFAKE via KaggleHub, SID_Set via Hugging Face, WildFake via ModelScope, and AIGC-Detection-Benchmark via Hugging Face, then writes `data/train`, `data/val`, and `data/aigc_benchmark`. `.env` and images stay out of git. `~/.kaggle/kaggle.json` still works if `.env` is missing.
 
-## Train
+## Steps to Reproduce Results
+
+### 1. Download and Prepare Data
 
 ```bash
+# Download full training dataset (CIFAKE + SID_Set + WildFake, excludes demo split)
+python scripts/download_datasets.py
+
+# For demo video only (WildFake validation subset)
+python scripts/download_demo.py
+```
+
+### 2. Train the Model
+
+```bash
+# Full training (5 epochs by default)
 python train.py --train_dir data/train --val_dir data/val --config configs/default.yaml
 ```
 
-Checkpoints: `checkpoints/best.pt`, `checkpoints/last.pt`.
+Checkpoints are saved to `checkpoints/best.pt` (best validation score) and `checkpoints/last.pt` (latest epoch).
+
+### 3. Evaluate on Validation Set
+
+```bash
+# In-distribution evaluation with robustness table
+python evaluate.py --data_dir data/val --checkpoint checkpoints/best.pt --output outputs/robustness.csv
+```
+
+### 4. Evaluate on Unseen Generators
+
+```bash
+# Cross-generator generalization test
+python evaluate.py --data_dir data/aigc_benchmark --checkpoint checkpoints/best.pt --output outputs/aigc_test.csv
+```
+
+### 5. Run Inference on New Images
+
+```bash
+# Batch inference on image directory
+python infer.py --input_dir path/to/images --output outputs/preds.json --checkpoint checkpoints/best.pt
+```
+
+### 6. Demo (Optional)
+
+```bash
+# Run demo app
+python app.py --checkpoint checkpoints/best.pt
+```
+
+## Train
 
 ## Inference (required deliverable)
 
@@ -118,13 +171,50 @@ Upload an image, optionally apply an official transform, read P(AIGC) and the fo
 - Python, PyTorch, torchvision, open_clip, Gradio, scikit-learn, pandas
 - Editor: Cursor / VS Code; optional Colab for GPU training
 
-## Limitations / next
+## Limitations and Future Improvements
 
-- Zero-shot CLIP is a baseline, not a detector. Train the gate + forensic head on SID_Set or WildFake (minus the demo split).
-- CIFAKE 32×32 is not a fair generator-forensics test after upsampling.
-- No generator-ID attribution; image-level only, as specified.
-- Given more time: multi-layer CLIP patch features, test-time augmentation, and a second forensic view (NPR-only) for JPEG q=30.
+### Current Limitations
 
-## Team
+1. **Generator Generalization**: Performance drops significantly on unseen AI generators not present in training data (e.g., newer models like DALL-E 3, Midjourney v6)
 
-Solo unless you add names here.
+2. **Cross-Dataset Performance**: Model trained on specific datasets may not generalize well to images from different domains or demographics
+
+3. **Computational Requirements**: Training requires GPU acceleration; inference is optimized but still benefits from GPU for batch processing
+
+4. **Severe Transformations**: Severe JPEG compression (quality < 30) and extreme blur (σ=2) remain challenging despite the degradation-aware gate
+
+5. **No Generator Attribution**: System provides binary classification only, cannot identify which specific generator created an image
+
+6. **CIFAKE Limitations**: CIFAKE 32×32 images are not a fair generator-forensics test after upsampling to 224×224
+
+### Future Improvements
+
+Given more time and resources, the following improvements would be pursued:
+
+1. **Enhanced Training Data**: Incorporate more diverse datasets including newer generators and varied demographic content
+
+2. **Multi-Scale Features**: Extract features from multiple CLIP layers to capture both fine-grained and high-level patterns
+
+3. **Test-Time Augmentation**: Apply multiple transformations during inference and aggregate predictions for improved robustness
+
+4. **Specialized JPEG Handling**: Add a dedicated forensic branch optimized for heavily compressed images (NPR-only view for JPEG q=30)
+
+5. **Generator Identification**: Extend to multi-class classification to identify specific AI generators
+
+6. **Edge Deployment**: Optimize for mobile/embedded deployment with model quantization and pruning
+
+7. **Active Learning**: Implement continuous learning pipeline to adapt to new generators
+
+## Team Contributions
+
+**Team Members:**
+- Dazzel — github.com/dazzelll
+- Zhi Ling — github.com/zhilingggg
+
+**Key Contributions:**
+- Architecture design and implementation of ForgeGate model
+- Development of degradation-aware gate mechanism
+- Implementation of protocol-matched training pipeline
+- Creation of robustness evaluation framework
+- Development of inference and evaluation scripts
+- Comprehensive documentation and reproducibility setup
